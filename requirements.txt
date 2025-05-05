@@ -1,5 +1,7 @@
 streamlit
 pandas
-requests
+xlsxwriter
+openpyxl
+pyarrow
 sqlalchemy
-psycopg2-binary
+jsonschema
