@@ -1,103 +1,141 @@
-import streamlit as st
+```python
+import os
+import yaml
 import pandas as pd
+import streamlit as st
+import plotly.express as px
 import requests
 from sqlalchemy import create_engine
+from datetime import datetime
+from apscheduler.schedulers.background import BackgroundScheduler
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
 
-st.set_page_config(page_title="ETL Tool", layout="wide")
+# --- CONFIG & CACHING ---
+st.set_page_config(page_title="Next-Gen ETL Orchestrator", layout="wide")
+@st.experimental_singleton
+def load_config(path='config.yaml'):
+    return yaml.safe_load(open(path)) if os.path.exists(path) else {}
 
-@st.cache_data
-def load_csv(file):
-    return pd.read_csv(file)
+config = load_config()
 
-@st.cache_data
-def fetch_api(url, headers):
-    response = requests.get(url, headers=headers)
-    response.raise_for_status()
-    data = response.json()
-    return pd.json_normalize(data)
+# --- SLACK NOTIFICATIONS ---
+slack_token = os.getenv('SLACK_TOKEN')
+slack_client = WebClient(token=slack_token) if slack_token else None
 
-@st.cache_data
-def query_db(conn_str, query):
-    engine = create_engine(conn_str)
-    df = pd.read_sql(query, engine)
-    engine.dispose()
+def notify_slack(channel, message):
+    if not slack_client: return
+    try:
+        slack_client.chat_postMessage(channel=channel, text=message)
+    except SlackApiError as e:
+        st.error(f"Slack notify failed: {e.response['error']}")
+
+# --- ETL STEP FUNCTIONS ---
+def extract(step):
+    t = step['type']
+    if t == 'csv': return pd.read_csv(step['path'])
+    if t == 'api': return pd.json_normalize(requests.get(step['url'], headers=step.get('headers', {})).json())
+    if t == 'db':
+        eng = create_engine(step['connection'])
+        df = pd.read_sql(step['query'], eng)
+        eng.dispose(); return df
+    raise ValueError(f"Invalid extract type: {t}")
+
+
+def transform(df, step):
+    if 'filter' in step:
+        return df.query(step['filter'])
+    if 'rename' in step:
+        return df.rename(columns=step['rename'])
+    if 'compute' in step:
+        df[step['compute']['col']] = df.eval(step['compute']['expr'])
+        return df
+    if 'pivot' in step:
+        return df.pivot_table(**step['pivot'])
     return df
 
 
-def extract_data():
-    st.sidebar.header("Extraction")
-    method = st.sidebar.radio("Select method", ["CSV Upload", "API Endpoint", "Database Query"])
+def load(df, step):
+    if step['type'] == 'csv':
+        df.to_csv(step['path'], index=False)
+    elif step['type'] == 'db':
+        eng = create_engine(step['connection'])
+        df.to_sql(step['table'], eng, if_exists=step.get('if_exists','append'), index=False)
+        eng.dispose()
+
+# --- PIPELINE EXECUTION ---
+def run_pipeline(name):
+    steps = config.get(name, {})
     df = None
-    if method == "CSV Upload":
-        file = st.sidebar.file_uploader("Upload CSV", type=["csv"]);
-        if file: df = load_csv(file)
-    elif method == "API Endpoint":
-        url = st.sidebar.text_input("API URL")
-        hdrs = st.sidebar.text_area("Headers (JSON)", "{}")
-        if st.sidebar.button("Fetch API Data"):
-            headers = eval(hdrs)
-            df = fetch_api(url, headers)
-    else:
-        conn_str = st.sidebar.text_input("DB Connection (SQLAlchemy)")
-        query = st.sidebar.text_area("SQL Query")
-        if st.sidebar.button("Run Query"):
-            df = query_db(conn_str, query)
-    return df
+    logs = []
+    try:
+        for s in steps.get('extract', []):
+            df = extract(s); logs.append(f"Extracted: {s['type']}")
+        for s in steps.get('transform', []):
+            df = transform(df, s); logs.append(f"Transformed: {list(s.keys())[0]}")
+        for s in steps.get('load', []):
+            load(df, s); logs.append(f"Loaded: {s['type']}")
+        logs.append("✅ Pipeline succeeded")
+        notify_slack(steps.get('notify_channel',''), f"Pipeline {name} succeeded at {datetime.utcnow()}")
+    except Exception as e:
+        logs.append(f"❌ Error: {e}")
+        notify_slack(steps.get('notify_channel',''), f"Pipeline {name} failed: {e}")
+    return df, logs
 
+# --- SCHEDULER SETUP ---
+scheduler = BackgroundScheduler()
+for name,p in config.items():
+    cron = p.get('schedule')
+    if cron:
+        cron_fields = cron.split()
+        scheduler.add_job(run_pipeline, 'cron', args=[name],
+                          minute=cron_fields[0], hour=cron_fields[1],
+                          day=cron_fields[2], month=cron_fields[3], day_of_week=cron_fields[4],
+                          id=name)
+scheduler.start()
 
-def transform_data(df):
-    if df is None:
-        return None
-    st.header("Transformation")
-    st.dataframe(df.head())
+# --- UI LAYOUT ---
+st.title("🚀 Next-Gen ETL Orchestrator 🚀")
+col1, col2 = st.columns([1,3])
+with col1:
+    st.sidebar.header("Pipelines")
+    selected = st.sidebar.selectbox("Pipeline", list(config.keys()))
+    mode = st.sidebar.radio("Mode", ['Preview','Run','Metrics','Logs','Schedule'])
 
-    if st.expander("Rename Columns"):
-        mapping = st.text_area("Mapping as Python dict", "{}")
-        if st.button("Apply Rename"):
-            df.rename(columns=eval(mapping), inplace=True)
-            st.success("Columns renamed")
+with col2:
+    if mode == 'Preview':
+        df, _ = run_pipeline(selected)
+        st.dataframe(df.head(100), use_container_width=True)
+        st.download_button("Download CSV", df.to_csv(index=False).encode(), file_name=f"{selected}.csv")
 
-    if st.expander("Filter Rows"):
-        expr = st.text_input("Pandas query expression", "")
-        if st.button("Apply Filter") and expr:
-            df = df.query(expr)
-            st.success("Filter applied")
+    elif mode == 'Run':
+        if st.button(f"Run {selected}"):
+            with st.spinner("Executing..."):
+                df, logs = run_pipeline(selected)
+            for msg in logs: st.write(msg)
 
-    if st.expander("Add Computed Column"):
-        new_col = st.text_input("Column name")
-        expr = st.text_area("Expression (pandas eval)")
-        if st.button("Add Column") and new_col and expr:
-            df[new_col] = df.eval(expr)
-            st.success(f"Column '{new_col}' added")
+    elif mode == 'Metrics':
+        df,_ = run_pipeline(selected)
+        st.metric(label="Rows", value=df.shape[0])
+        st.metric(label="Columns", value=df.shape[1])
+        st.markdown("#### Column Distributions")
+        for col in df.select_dtypes('number').columns:
+            fig = px.histogram(df, x=col, title=col)
+            st.plotly_chart(fig, use_container_width=True)
 
-    st.write(df)
-    return df
+    elif mode == 'Logs':
+        st.markdown("### Scheduler Jobs")
+        jobs = scheduler.get_jobs()
+        for job in jobs: st.write(f"• {job.id} → {job.next_run_time}")
 
+    elif mode == 'Schedule':
+        cron = st.text_input("Cron Expr", config[selected].get('schedule',''))
+        chan = st.text_input("Slack Channel", config[selected].get('notify_channel',''))
+        if st.button("Update Schedule"):
+            config[selected]['schedule'], config[selected]['notify_channel'] = cron, chan
+            yaml.safe_dump(config, open('config.yaml','w'))
+            st.success("Schedule updated")
 
-def load_data(df):
-    if df is None:
-        return
-    st.header("Load")
-    choice = st.selectbox("Load to", ["Download CSV", "Database"])
-    if choice == "Download CSV":
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button("Download as CSV", csv, "data_export.csv", "text/csv")
-    else:
-        db_url = st.text_input("DB Connection (SQLAlchemy)")
-        tbl = st.text_input("Target Table Name")
-        if st.button("Write to DB"):
-            engine = create_engine(db_url)
-            df.to_sql(tbl, engine, if_exists='replace', index=False)
-            engine.dispose()
-            st.success(f"Data written to table '{tbl}'")
-
-
-def main():
-    st.title("ETL Tool Web App")
-    df = extract_data()
-    df = transform_data(df)
-    load_data(df)
-
-
-if __name__ == "__main__":
-    main()
+st.sidebar.markdown("---")
+st.sidebar.markdown("Built-in Slack alerts, multi-step metrics, cron jobs, and pivot transforms!")
+```
