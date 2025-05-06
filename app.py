@@ -1,215 +1,196 @@
 import os
-import json
 import streamlit as st
 import pandas as pd
+import numpy as np
+import yaml
 from io import BytesIO
 from sqlalchemy import create_engine, inspect
+from pandasql import sqldf
 
-# --- Configuration ---
-st.set_page_config(page_title="Advanced Business Data Transformer", layout="wide")
-if 'steps' not in st.session_state:
-    st.session_state.steps = []
-if 'db_engine' not in st.session_state:
-    st.session_state.db_engine = None
+# --- App Config ---
+st.set_page_config(page_title="Data Transformer Pro Plus +", layout="wide")
+st.title("🛠️ Data Transformer Pro Plus +")
+
+# Initialize session state
+def init_state():
+    if 'df' not in st.session_state: st.session_state.df = None
+    if 'steps' not in st.session_state: st.session_state.steps = []
+    if 'pipeline_loaded' not in st.session_state: st.session_state.pipeline_loaded = False
+    if 'df_aux' not in st.session_state: st.session_state.df_aux = None  # for joins
+init_state()
 
 # --- File Loading ---
-def load_file(uploaded_file):
-    name = uploaded_file.name.lower()
+def load_file(u):
+    ext = u.name.split('.')[-1].lower()
     try:
-        if name.endswith('.csv'):
-            return {'Sheet1': pd.read_csv(uploaded_file)}
-        if name.endswith(('.xls', '.xlsx')):
-            engine = 'xlrd' if name.endswith('.xls') else 'openpyxl'
-            return pd.read_excel(uploaded_file, sheet_name=None, engine=engine)
-        if name.endswith('.json'):
-            return {'Data': pd.read_json(uploaded_file)}
-        if name.endswith('.parquet'):
-            return {'Data': pd.read_parquet(uploaded_file)}
+        if ext == 'csv': return pd.read_csv(u)
+        if ext in ['xls','xlsx']: return pd.read_excel(u, sheet_name=None)
+        if ext == 'parquet': return pd.read_parquet(u)
+        if ext == 'json': return pd.read_json(u)
     except Exception as e:
-        st.error(f"Failed to parse file: {e}")
-    st.error('Unsupported or corrupt file type')
-    return {}
+        st.error(f"Load error: {e}")
+    return None
 
-# --- Cleaning Utilities ---
-def auto_clean(df):
-    for col in df.select_dtypes(include='object').columns:
-        df[col] = df[col].astype(str).str.strip().str.lower()
-    for col in df.select_dtypes(include='number').columns:
-        df[col].fillna(df[col].median(), inplace=True)
+# --- Transformation Functions ---
+def rename_columns(df, old, new): return df.rename(columns={old:new})
+
+def filter_rows(df, expr):
+    try: return df.query(expr)
+    except Exception:
+        st.warning(f"Invalid filter: {expr}")
+        return df
+
+def compute_column(df, new_col, formula):
+    try: df[new_col] = df.eval(formula)
+    except Exception:
+        st.warning(f"Invalid formula: {formula}")
     return df
 
-def outlier_removal(df, columns, threshold):
-    for col in columns:
-        if col in df:
-            mean, std = df[col].mean(), df[col].std()
-            df = df[(df[col] - mean).abs() <= threshold * std]
+def drop_constant(df):
+    const_cols = [c for c in df.columns if df[c].nunique()<=1]
+    return df.drop(columns=const_cols)
+
+def one_hot_encode(df, cols):
+    return pd.get_dummies(df, columns=cols)
+
+def join_data(df, df2, left_on, right_on, how):
+    return df.merge(df2, left_on=left_on, right_on=right_on, how=how)
+
+def run_sql(df, query):
+    try: return sqldf(query, {'df':df})
+    except Exception:
+        st.warning(f"Invalid SQL: {query}")
+        return df
+
+def auto_impute(df):
+    for col in df.columns:
+        if df[col].isna().any():
+            if df[col].dtype in [np.float64, np.int64]: df[col].fillna(df[col].median(), inplace=True)
+            else: df[col].fillna(df[col].mode()[0], inplace=True)
     return df
 
-# --- Transformation Application ---
+# --- Step Application ---
 def apply_steps(df):
-    for step in st.session_state.steps:
-        op = step['operation']
-        if op == 'rename':
-            df = df.rename(columns=step['mapping'])
-        elif op == 'filter':
-            expr = step.get('expression', '').strip()
-            if expr:
-                try:
-                    df = df.query(expr)
-                except Exception as e:
-                    st.warning(f"Skipping invalid filter '{expr}': {e}")
-        elif op == 'compute':
-            df[step['new_column']] = df.eval(step['expression'])
-        elif op == 'drop':
-            df = df.drop(columns=step['columns'])
-        elif op == 'sort':
-            df = df.sort_values(by=step['columns'], ascending=step['ascending'])
-        elif op == 'pivot':
-            df = df.pivot_table(index=step['index'], columns=step['columns'], values=step['values'], aggfunc=step['aggfunc'])
-        elif op == 'melt':
-            df = pd.melt(df, id_vars=step['id_vars'], value_vars=step['value_vars'])
-        elif op == 'trim':
-            for col in step['columns']:
-                df[col] = df[col].astype(str).str.strip()
-        elif op == 'case':
-            func, cols = step['case'], step['columns']
-            for col in cols:
-                df[col] = getattr(df[col].str, func)()
-        elif op == 'dedupe':
-            df = df.drop_duplicates(subset=step['subset'] or None, keep=step['keep'])
-        elif op == 'impute':
-            for col in step['columns']:
-                strat = step['strategy']
-                if strat == 'mean': df[col].fillna(df[col].mean(), inplace=True)
-                elif strat == 'median': df[col].fillna(df[col].median(), inplace=True)
-                elif strat == 'mode': df[col].fillna(df[col].mode()[0], inplace=True)
-                elif strat == 'constant': df[col].fillna(step.get('constant'), inplace=True)
-        elif op == 'parse_date':
-            for col in step['columns']:
-                df[col] = pd.to_datetime(df[col], format=step['format'], errors='coerce')
-        elif op == 'remove_special':
-            for col in step['columns']:
-                df[col] = df[col].astype(str).str.replace(r'[^\w\s]', '', regex=True)
-        elif op == 'outlier':
-            df = outlier_removal(df, step['columns'], step['threshold'])
-        elif op == 'auto_clean':
-            df = auto_clean(df)
+    for i, step in enumerate(st.session_state.steps):
+        t = step['type']
+        if t=='rename': df = rename_columns(df, step['old'], step['new'])
+        elif t=='filter': df = filter_rows(df, step['expr'])
+        elif t=='compute': df = compute_column(df, step['new'], step['expr'])
+        elif t=='drop_const': df = drop_constant(df)
+        elif t=='onehot': df = one_hot_encode(df, step['cols'])
+        elif t=='join': df = join_data(df, st.session_state.df_aux, step['left'], step['right'], step['how'])
+        elif t=='sql': df = run_sql(df, step['query'])
+        elif t=='impute': df = auto_impute(df)
     return df
 
-# --- UI ---
-st.title('🚀 Advanced Business Data Transformer')
+# --- Pipeline Persistence ---
+def save_pipeline(path='pipeline.yaml'):
+    with open(path,'w') as f:
+        yaml.dump(st.session_state.steps, f)
+    st.success(f"Pipeline saved to {path}")
 
-uploaded = st.file_uploader('Upload file (CSV, XLS/XLSX, JSON, Parquet)', type=['csv','xls','xlsx','json','parquet'])
-if not uploaded:
-    st.info('Please upload a file to begin')
-    st.stop()
+def load_pipeline(path):
+    steps = yaml.safe_load(path.read())
+    st.session_state.steps = steps
+    st.session_state.pipeline_loaded = True
+    st.success("Pipeline loaded")
 
-datasets = load_file(uploaded)
-sheet = st.selectbox('Select sheet/dataset', list(datasets.keys()))
-df_orig = datasets[sheet].copy()
+# --- UI Workflow ---
+tabs = st.tabs(["📥 Load","🔧 Transform","📊 Profile","⬇️ Export","⚙️ Pipeline"])
 
-# Sidebar: Steps
-st.sidebar.header('Transformation Steps')
-for i, s in enumerate(st.session_state.steps):
-    st.sidebar.write(f"{i+1}. {s['operation']} - {s.get('description','')}")
-with st.sidebar.expander('Add Step'):
-    op = st.selectbox('Operation', [
-        'rename','filter','compute','drop','sort','pivot','melt',
-        'trim','case','dedupe','impute','parse_date','remove_special','outlier','auto_clean'
-    ])
-    if op == 'rename':
-        mapping = st.text_area('JSON mapping', value='{}')
-        if st.button('Add'): st.session_state.steps.append({'operation':'rename','mapping':json.loads(mapping),'description':mapping})
-    elif op == 'filter':
-        expr = st.text_input('Expression')
-        if st.button('Add'): st.session_state.steps.append({'operation':'filter','expression':expr,'description':expr})
-    elif op == 'compute':
-        new = st.text_input('Column')
-        expr = st.text_area('Expression')
-        if st.button('Add'): st.session_state.steps.append({'operation':'compute','new_column':new,'expression':expr,'description':f"{new}={expr}"})
-    elif op == 'drop':
-        cols = st.multiselect('Columns', df_orig.columns.tolist())
-        if st.button('Add'): st.session_state.steps.append({'operation':'drop','columns':cols,'description':f"drop {cols}"})
-    elif op == 'sort':
-        cols = st.multiselect('By', df_orig.columns.tolist())
-        asc = st.checkbox('Ascending', value=True)
-        if st.button('Add'): st.session_state.steps.append({'operation':'sort','columns':cols,'ascending':asc,'description':f"sort {cols} asc={asc}"})
-    elif op == 'pivot':
-        idx = st.multiselect('Index', df_orig.columns.tolist())
-        cols = st.multiselect('Columns', df_orig.columns.tolist())
-        vals = st.selectbox('Values', df_orig.columns.tolist())
-        agg = st.selectbox('Agg', ['sum','mean','min','max','count'])
-        if st.button('Add'): st.session_state.steps.append({'operation':'pivot','index':idx,'columns':cols,'values':vals,'aggfunc':agg,'description':'pivot'})
-    elif op == 'melt':
-        idv = st.multiselect('ID vars', df_orig.columns.tolist())
-        valv = st.multiselect('Value vars', df_orig.columns.tolist())
-        if st.button('Add'): st.session_state.steps.append({'operation':'melt','id_vars':idv,'value_vars':valv,'description':'melt'})
-    elif op == 'trim':
-        cols = st.multiselect('Columns', df_orig.select_dtypes(include='object').columns.tolist())
-        if st.button('Add'): st.session_state.steps.append({'operation':'trim','columns':cols,'description':f"trim {cols}"})
-    elif op == 'case':
-        cols = st.multiselect('Columns', df_orig.select_dtypes(include='object').columns.tolist())
-        case = st.selectbox('Case', ['lower','upper','title'])
-        if st.button('Add'): st.session_state.steps.append({'operation':'case','columns':cols,'case':case,'description':f"case {case}"})
-    elif op == 'dedupe':
-        cols = st.multiselect('Subset (optional)', df_orig.columns.tolist())
-        keep = st.selectbox('Keep', ['first','last','none'])
-        if st.button('Add'): st.session_state.steps.append({'operation':'dedupe','subset':cols,'keep':keep,'description':'dedupe'})
-    elif op == 'impute':
-        cols = st.multiselect('Cols', df_orig.select_dtypes(include='number').columns.tolist())
-        strat = st.selectbox('Strategy', ['mean','median','mode','constant'])
-        const = st.text_input('Constant value') if strat=='constant' else None
-        if st.button('Add'): st.session_state.steps.append({'operation':'impute','columns':cols,'strategy':strat,'constant':const,'description':'impute'})
-    elif op == 'parse_date':
-        cols = st.multiselect('Cols', df_orig.select_dtypes(include='object').columns.tolist())
-        fmt = st.text_input('Format', '%Y-%m-%d')
-        if st.button('Add'): st.session_state.steps.append({'operation':'parse_date','columns':cols,'format':fmt,'description':'parse_date'})
-    elif op == 'remove_special':
-        cols = st.multiselect('Cols', df_orig.select_dtypes(include='object').columns.tolist())
-        if st.button('Add'): st.session_state.steps.append({'operation':'remove_special','columns':cols,'description':'remove_special'})
-    elif op == 'outlier':
-        cols = st.multiselect('Cols', df_orig.select_dtypes(include='number').columns.tolist())
-        thr = st.number_input('Z-threshold', value=3.0)
-        if st.button('Add'): st.session_state.steps.append({'operation':'outlier','columns':cols,'threshold':thr,'description':'outlier'})
-    elif op == 'auto_clean':
-        if st.button('Add'): st.session_state.steps.append({'operation':'auto_clean','description':'auto_clean'})
-    if st.button('Clear All'): st.session_state.steps.clear(); st.experimental_rerun()
-
-# Apply and display
-df_transformed = apply_steps(df_orig)
-col1, col2 = st.columns(2)
-with col1:
-    if st.checkbox('Show Original'): st.dataframe(df_orig)
-with col2:
-    if st.checkbox('Show Transformed'): st.dataframe(df_transformed)
-
-# Download and Load
-tabs = st.tabs(['Download','Load & Access'])
+# Load tab
 with tabs[0]:
-    csv = df_transformed.to_csv(index=False).encode('utf-8')
-    st.download_button('Download CSV', csv, file_name=f'transformed_{sheet}.csv')
-    if uploaded.name.lower().endswith(('.xls','.xlsx')):
-        out = BytesIO();
-        with pd.ExcelWriter(out, engine='xlsxwriter') as w: df_transformed.to_excel(w, sheet_name=sheet, index=False); w.save()
-        st.download_button('Download Excel', out.getvalue(), file_name=f'transformed_{sheet}.xlsx')
+    st.subheader("1. Load Data")
+    uploaded = st.file_uploader("Upload primary file", type=['csv','xls','xlsx','parquet','json'])
+    aux = st.file_uploader("Upload secondary file for join (optional)", type=['csv','xls','xlsx','parquet','json'])
+    if uploaded:
+        data = load_file(uploaded)
+        if isinstance(data, dict): sheet = st.selectbox("Sheet", list(data.keys())); st.session_state.df = data[sheet]
+        else: st.session_state.df = data
+        st.success("Primary data loaded.")
+    if aux:
+        aux_data = load_file(aux)
+        if isinstance(aux_data, dict): sheet2 = st.selectbox("Aux sheet", list(aux_data.keys())); st.session_state.df_aux = aux_data[sheet2]
+        else: st.session_state.df_aux = aux_data
+        st.success("Secondary data loaded.")
+
+# Transform tab
 with tabs[1]:
-    db_url = st.text_input('Database URL', os.getenv('DATABASE_URL',''))
-    if st.button('Connect DB'):
-        try:
-            eng = create_engine(db_url)
-            st.session_state.db_engine = eng
-            st.success('DB Connected')
-        except Exception as e: st.error(e)
-    if st.session_state.db_engine:
-        eng = st.session_state.db_engine
-        tables = inspect(eng).get_table_names()
-        tbl = st.selectbox('Table to Load', tables)
-        if st.button('Load Table'):
-            df_db = pd.read_sql_table(tbl, eng)
-            st.dataframe(df_db)
-        new_tbl = st.text_input('Save As', f"transformed_{sheet}")
-        if st.button('Save to DB'):
+    st.subheader("2. Transform Data")
+    df = st.session_state.df
+    if df is None: st.info("Load data first.")
+    else:
+        # Manage steps
+        for idx, step in enumerate(st.session_state.steps):
+            cols = st.columns([0.8,0.1,0.1])
+            cols[0].write(f"**{idx+1}. {step['type']}**: {step.get('desc','')}")
+            if cols[1].button("⬆", key=f"up{idx}"):
+                if idx>0: st.session_state.steps[idx],st.session_state.steps[idx-1] = st.session_state.steps[idx-1],st.session_state.steps[idx]; st.experimental_rerun()
+            if cols[2].button("⬇", key=f"down{idx}"):
+                if idx<len(st.session_state.steps)-1: st.session_state.steps[idx],st.session_state.steps[idx+1] = st.session_state.steps[idx+1],st.session_state.steps[idx]; st.experimental_rerun()
+        st.markdown("---")
+        # Add step
+        op = st.selectbox("Operation",['rename','filter','compute','drop_const','onehot','join','sql','impute'], key='op_sel')
+        if op=='rename':
+            old = st.selectbox("Old name", df.columns.tolist()); new = st.text_input("New name")
+            if st.button("Add Rename"): st.session_state.steps.append({'type':'rename','old':old,'new':new,'desc':f"{old}→{new}"})
+        if op=='filter':
+            expr = st.text_input("Expression (e.g. col>5)")
+            if st.button("Add Filter"): st.session_state.steps.append({'type':'filter','expr':expr,'desc':expr})
+        if op=='compute':
+            newc = st.text_input("New Col"); expr2 = st.text_input("Formula")
+            if st.button("Add Compute"): st.session_state.steps.append({'type':'compute','new':newc,'expr':expr2,'desc':f"{newc}={expr2}"})
+        if op=='drop_const':
+            if st.button("Add Drop Constant Cols"): st.session_state.steps.append({'type':'drop_const','desc':'drop constant columns'})
+        if op=='onehot':
+            cols = st.multiselect("Cols to encode", df.select_dtypes('object').columns.tolist())
+            if st.button("Add One-Hot"): st.session_state.steps.append({'type':'onehot','cols':cols,'desc':f"onehot {cols}"})
+        if op=='join' and st.session_state.df_aux is not None:
+            left = st.selectbox("Left key", df.columns.tolist()); right = st.selectbox("Right key", st.session_state.df_aux.columns.tolist())
+            how = st.selectbox("Join type",['inner','left','right','outer'])
+            if st.button("Add Join"): st.session_state.steps.append({'type':'join','left':left,'right':right,'how':how,'desc':f"join {how} on {left}={right}"})
+        if op=='sql':
+            query = st.text_area("SQL Query", height=100)
+            if st.button("Add SQL"): st.session_state.steps.append({'type':'sql','query':query,'desc':'custom SQL'})
+        if op=='impute':
+            if st.button("Add Auto Impute"): st.session_state.steps.append({'type':'impute','desc':'auto impute'})
+        if st.button("Apply All Steps"): st.session_state.df = apply_steps(df)
+        st.experimental_data_editor(st.session_state.df, key='transformed')
+
+# Profile tab
+with tabs[2]:
+    st.subheader("3. Profile Data")
+    df = st.session_state.df
+    if df is None: st.info("Load and transform data first.")
+    else:
+        st.dataframe(pd.concat([df.dtypes.rename('dtype'), df.isna().sum().rename('nulls'), (df.isna().mean()*100).rename('null_pct')], axis=1))
+        for col in df.columns:
+            if pd.api.types.is_numeric_dtype(df[col]): st.line_chart(df[col].dropna())
+
+# Export tab
+with tabs[3]:
+    st.subheader("4. Export Data")
+    df = st.session_state.df
+    if df is not None:
+        fmt = st.selectbox("Format",['CSV','JSON','Parquet','Excel'])
+        if st.button("Download"): 
+            if fmt=='CSV': data=df.to_csv(index=False).encode(); st.download_button("CSV",data,"data.csv")
+            if fmt=='JSON': data=df.to_json(orient='records'); st.download_button("JSON",data,"data.json")
+            if fmt=='Parquet': data=df.to_parquet(index=False); st.download_button("Parquet",data,"data.parquet")
+            if fmt=='Excel': out=BytesIO(); df.to_excel(out,index=False, engine='openpyxl'); st.download_button("Excel",out.getvalue(),"data.xlsx")
+        st.markdown("---")
+        dburl = st.text_input("DB URL", os.getenv('DATABASE_URL',''))
+        if st.button("Save to DB"): 
             try:
-                df_transformed.to_sql(new_tbl, eng, if_exists='replace', index=False)
-                st.success(f'Saved to {new_tbl}')
-            except Exception as e: st.error(e)
+                eng = create_engine(dburl)
+                df.to_sql('transformed',eng,if_exists='replace',index=False)
+                st.success("Saved to DB table 'transformed'")
+            except Exception as e:
+                st.error(f"DB error: {e}")
+
+# Pipeline tab
+with tabs[4]:
+    st.subheader("⚙️ Pipeline Management")
+    if st.button("Save Pipeline"): save_pipeline()
+    pl_file = st.file_uploader("Load Pipeline YAML", type=['yaml','yml'])
+    if pl_file and not st.session_state.pipeline_loaded: load_pipeline(pl_file)
