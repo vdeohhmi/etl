@@ -285,50 +285,17 @@ def social_graph_tab():
         components.html(html, height=750, scrolling=True)
 
 # --- Render Tabs ---
-funcs = [datasets_tab, transform_tab, profile_tab, insights_tab, export_tab, history_tab, snowflake_tab, pipeline_tab, social_graph_tab]
+funcs = [
+    datasets_tab,
+    transform_tab,
+    profile_tab,
+    insights_tab,
+    export_tab,
+    history_tab,
+    snowflake_tab,
+    pipeline_tab,
+    social_graph_tab
+]
 for fn, tab in zip(funcs, tabs):
     with tab:
-        fn():
-    st.header("9. Social Network Graph")
-    key = st.session_state.current
-    if not key:
-        st.info("Select a dataset containing edge list first.")
-        return
-    df = st.session_state.datasets[key]
-    cols = list(df.columns)
-    source = st.selectbox("Source node column", cols, key='src_col')
-    target = st.selectbox("Target node column", cols, key='tgt_col')
-    weight_opt = [None] + cols
-    weight = st.selectbox("Edge weight column (optional)", weight_opt, key='wt_col')
-    if st.button("Generate Graph"):
-        # Build graph with weights
-        G = nx.Graph()
-        for _, row in df.iterrows():
-            u, v = row[source], row[target]
-            w = float(row[weight]) if weight and weight in row and pd.notna(row[weight]) else 1.0
-            if G.has_edge(u, v):
-                G[u][v]['weight'] += w
-            else:
-                G.add_edge(u, v, weight=w)
-        # Identify top-5 heaviest edges
-        edges_sorted = sorted(G.edges(data=True), key=lambda x: x[2]['weight'], reverse=True)
-        top5 = {(u, v) for u, v, d in edges_sorted[:5]}
-        # PyVis network
-        net = Network(height="700px", width="100%", bgcolor="#222222", font_color="white")
-        net.barnes_hut(gravity=-20000, central_gravity=0.3, spring_length=100, spring_strength=0.001)
-        # Add nodes
-        for n in G.nodes():
-            deg = G.degree(n)
-            net.add_node(n, label=str(n), title=f"Degree: {deg}", value=deg)
-        # Add edges with styling
-        for u, v, data in G.edges(data=True):
-            w = data['weight']
-            if (u, v) in top5 or (v, u) in top5:
-                net.add_edge(u, v, value=w, width=4, color='red', title=f"Weight: {w}")
-            else:
-                net.add_edge(u, v, value=w, width=1, color='rgba(200,200,200,0.2)', title=f"Weight: {w}")
-        # Show physics controls
-        net.show_buttons(filter_=['physics'])
-        html = net.generate_html()
-        import streamlit.components.v1 as components
-        components.html(html, height=750, scrolling=True)
+        fn()
