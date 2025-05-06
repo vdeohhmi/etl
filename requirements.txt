@@ -1,8 +1,9 @@
 streamlit
 pandas
-xlrd
-openpyxl
-xlsxwriter
+numpy
 pyarrow
+openpyxl
+xlrd
 sqlalchemy
-jsonschema
+pandasql
+yaml
