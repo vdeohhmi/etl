@@ -9,10 +9,8 @@ import snowflake.connector
 from snowflake.connector.pandas_tools import write_pandas
 import plotly.express as px
 import plotly.graph_objects as go
-import plotly.graph_objects as go
-import plotly.graph_objects as go
+from pyvis.network import Network
 import networkx as nx
-from datetime import datetime
 import yaml
 
 # --- App Configuration ---
@@ -39,14 +37,10 @@ def get_sf_conn():
 def load_file(u):
     ext = u.name.split('.')[-1].lower()
     try:
-        if ext == 'csv':
-            return pd.read_csv(u)
-        if ext in ['xls', 'xlsx']:
-            return pd.read_excel(u, sheet_name=None)
-        if ext == 'parquet':
-            return pd.read_parquet(u)
-        if ext == 'json':
-            return pd.read_json(u)
+        if ext == 'csv': return pd.read_csv(u)
+        if ext in ['xls', 'xlsx']: return pd.read_excel(u, sheet_name=None)
+        if ext == 'parquet': return pd.read_parquet(u)
+        if ext == 'json': return pd.read_json(u)
     except Exception as e:
         st.error(f"Failed to load {u.name}: {e}")
     return None
@@ -60,23 +54,17 @@ def apply_steps(df):
         elif t == 'filter':
             expr = step['expr']
             if expr:
-                try:
-                    df = df.query(expr)
-                except Exception:
-                    st.warning(f"Invalid filter: {expr}")
+                try: df = df.query(expr)
+                except: st.warning(f"Invalid filter: {expr}")
         elif t == 'compute':
             expr = step['expr']
             if expr.lower().startswith('sql:'):
                 q = expr[4:].strip()
-                try:
-                    df = sqldf(q, {'df': df})
-                except Exception:
-                    st.warning(f"Invalid SQL: {q}")
+                try: df = sqldf(q, {'df': df})
+                except: st.warning(f"Invalid SQL: {q}")
             else:
-                try:
-                    df[step['new']] = df.eval(expr)
-                except Exception:
-                    st.warning(f"Invalid formula: {expr}")
+                try: df[step['new']] = df.eval(expr)
+                except: st.warning(f"Invalid formula: {expr}")
         elif t == 'drop_const':
             df = df.loc[:, df.nunique() > 1]
         elif t == 'onehot':
@@ -84,19 +72,12 @@ def apply_steps(df):
         elif t == 'join' and step.get('aux'):
             aux_df = st.session_state.datasets.get(step['aux'])
             if aux_df is not None:
-                df = df.merge(
-                    aux_df,
-                    left_on=step['left'],
-                    right_on=step['right'],
-                    how=step['how']
-                )
+                df = df.merge(aux_df, left_on=step['left'], right_on=step['right'], how=step['how'])
         elif t == 'impute':
             for c in df.columns:
                 if df[c].isna().any():
-                    if pd.api.types.is_numeric_dtype(df[c]):
-                        df[c].fillna(df[c].median(), inplace=True)
-                    else:
-                        df[c].fillna(df[c].mode().iloc[0], inplace=True)
+                    if pd.api.types.is_numeric_dtype(df[c]): df[c].fillna(df[c].median(), inplace=True)
+                    else: df[c].fillna(df[c].mode().iloc[0], inplace=True)
     return df
 
 # --- UI Tabs ---
@@ -113,35 +94,27 @@ tabs = st.tabs([
 ])
 
 # Datasets Tab
+
 def datasets_tab():
     st.header("1. Upload & Manage Datasets")
-    files = st.file_uploader(
-        "Upload files", type=['csv','xls','xlsx','parquet','json'], accept_multiple_files=True
-    )
+    files = st.file_uploader("Upload files (CSV/Excel/Parquet/JSON)", type=['csv','xls','xlsx','parquet','json'], accept_multiple_files=True)
     if files:
         for u in files:
-            df = load_file(u)
-            if isinstance(df, dict):
-                for sheet, sdf in df.items():
+            data = load_file(u)
+            if isinstance(data, dict):
+                for sheet, sdf in data.items():
                     key = f"{u.name}:{sheet}"
                     st.session_state.datasets[key] = sdf
-            elif df is not None:
-                st.session_state.datasets[u.name] = df
+            elif data is not None:
+                st.session_state.datasets[u.name] = data
         st.success(f"Loaded {len(files)} files into {len(st.session_state.datasets)} datasets.")
     if st.session_state.datasets:
-        sel = st.selectbox(
-            "Select active dataset",
-            list(st.session_state.datasets.keys()),
-            key='sel_dataset'
-        )
+        sel = st.selectbox("Select active dataset", list(st.session_state.datasets.keys()), key='sel_dataset')
         st.session_state.current = sel
-        st.data_editor(
-            st.session_state.datasets[sel],
-            key=f"editor_{sel}",
-            use_container_width=True
-        )
+        st.data_editor(st.session_state.datasets[sel], key=f"editor_{sel}", use_container_width=True)
 
 # Transform Tab
+
 def transform_tab():
     st.header("2. Build Transformations")
     key = st.session_state.current
@@ -149,73 +122,45 @@ def transform_tab():
         st.info("Upload and select a dataset first.")
         return
     df = st.session_state.datasets[key]
-    for i, s in enumerate(st.session_state.steps):
-        st.write(f"{i+1}. {s['type']} — {s.get('desc','')}")
+    for i, step in enumerate(st.session_state.steps):
+        st.write(f"{i+1}. {step['type']} — {step.get('desc','')}")
     st.markdown("---")
-    op = st.selectbox(
-        "Operation",
-        ['rename','filter','compute','drop_const','onehot','join','impute'],
-        key='op_transform'
-    )
+    op = st.selectbox("Operation", ['rename','filter','compute','drop_const','onehot','join','impute'], key='op_transform')
     if op == 'rename':
-        old = st.selectbox("Old col", df.columns)
-        new = st.text_input("New col name")
+        old = st.selectbox("Old column", df.columns)
+        new = st.text_input("New column name")
         if st.button("Add Rename"):
-            st.session_state.steps.append({
-                'type':'rename','old':old,'new':new,'desc':f"Rename {old}→{new}"}
-            )
+            st.session_state.steps.append({'type':'rename','old':old,'new':new,'desc':f"Rename {old}→{new}"})
     elif op == 'filter':
-        st.write("Available columns:", list(df.columns))
         expr = st.text_input("Filter expression")
+        st.write("Columns:", df.columns.tolist())
         if st.button("Add Filter"):
-            st.session_state.steps.append({
-                'type':'filter','expr':expr,'desc':expr}
-            )
+            st.session_state.steps.append({'type':'filter','expr':expr,'desc':expr})
     elif op == 'compute':
-        newc = st.text_input("New column", help="Name for the computed column.")
-        st.write("**Available columns:**", list(df.columns))
-        st.write("**Functions:** np.log(), np.sqrt(), prefix SQL: for SQL queries")
-        expr2 = st.text_input("Formula or SQL:", help="Enter a pandas eval formula or prefix with SQL:")
+        newc = st.text_input("New column name", help="Name for the computed column.")
+        st.write("Columns:", df.columns.tolist())
+        st.write("Functions: np.log(), np.sqrt(); prefix SQL: for SQL queries")
+        expr2 = st.text_input("Formula or SQL:", help="Enter formula or SQL: query.")
         if st.button("Add Compute"):
-            st.session_state.steps.append({
-                'type':'compute','new':newc,'expr':expr2,'desc':f"Compute {newc} = {expr2}"}
-            )
+            st.session_state.steps.append({'type':'compute','new':newc,'expr':expr2,'desc':f"Compute {newc}"})
     elif op == 'drop_const':
-        if st.button("Add Drop Constants"):
-            st.session_state.steps.append({'type':'drop_const','desc':'Drop constant columns'})
+        if st.button("Add Drop Constants"): st.session_state.steps.append({'type':'drop_const','desc':'Drop constants'})
     elif op == 'onehot':
-        cols = st.multiselect(
-            "Columns to encode", df.select_dtypes('object').columns
-        )
-        if st.button("Add One-Hot"):
-            st.session_state.steps.append({
-                'type':'onehot','cols':cols,'desc':f"One-hot {cols}"}
-            )
+        cols = st.multiselect("Columns to encode", df.select_dtypes('object').columns)
+        if st.button("Add One-Hot"): st.session_state.steps.append({'type':'onehot','cols':cols,'desc':f"One-hot {cols}"})
     elif op == 'join':
-        aux = st.selectbox(
-            "Aux dataset",
-            [k for k in st.session_state.datasets if k != key]
-        )
+        aux = st.selectbox("Aux dataset", [k for k in st.session_state.datasets if k != key])
         left = st.selectbox("Left key", df.columns)
         right = st.selectbox("Right key", st.session_state.datasets[aux].columns)
         how = st.selectbox("Join type", ['inner','left','right','outer'])
-        if st.button("Add Join"):
-            st.session_state.steps.append({
-                'type':'join','aux':aux,'left':left,'right':right,'how':how,'desc':f"Join {aux}"}
-            )
+        if st.button("Add Join"): st.session_state.steps.append({'type':'join','aux':aux,'left':left,'right':right,'how':how,'desc':f"Join {aux}"})
     elif op == 'impute':
-        if st.button("Add Auto-Impute"):
-            st.session_state.steps.append({'type':'impute','desc':'Auto-impute'})
-    if st.button("Apply Transformations"):
-        st.session_state.datasets[key] = apply_steps(df)
-        st.success("Applied steps.")
-    st.data_editor(
-        st.session_state.datasets[key],
-        key=f"transformed_{key}",
-        use_container_width=True
-    )
+        if st.button("Add Auto-Impute"): st.session_state.steps.append({'type':'impute','desc':'Auto-impute'})
+    if st.button("Apply Transformations"): st.session_state.datasets[key] = apply_steps(df); st.success("Applied steps.")
+    st.data_editor(st.session_state.datasets[key], key=f"transformed_{key}", use_container_width=True)
 
 # Profile Tab
+
 def profile_tab():
     st.header("3. Data Profile")
     key = st.session_state.current
@@ -223,14 +168,11 @@ def profile_tab():
         st.info("Select a dataset first.")
         return
     df = st.session_state.datasets[key]
-    stats = pd.DataFrame({
-        'dtype': df.dtypes,
-        'nulls': df.isna().sum(),
-        'null_pct': df.isna().mean() * 100
-    })
+    stats = pd.DataFrame({'dtype': df.dtypes, 'nulls': df.isna().sum(), 'null_pct': df.isna().mean()*100})
     st.dataframe(stats, use_container_width=True)
 
 # Insights Tab
+
 def insights_tab():
     st.header("4. Auto Insights")
     key = st.session_state.current
@@ -247,6 +189,7 @@ def insights_tab():
         st.plotly_chart(fig2, use_container_width=True)
 
 # Export Tab
+
 def export_tab():
     st.header("5. Export & Writeback")
     key = st.session_state.current
@@ -256,37 +199,25 @@ def export_tab():
     df = st.session_state.datasets[key]
     fmt = st.selectbox("Format", ['CSV','JSON','Parquet','Excel','Snowflake'], key='fmt')
     if st.button("Export"):
-        if fmt == 'CSV':
-            st.download_button("Download CSV", df.to_csv(index=False).encode(), "data.csv")
-        elif fmt == 'JSON':
-            st.download_button("Download JSON", df.to_json(orient='records'), "data.json")
-        elif fmt == 'Parquet':
-            st.download_button("Download Parquet", df.to_parquet(index=False), "data.parquet")
-        elif fmt == 'Excel':
-            out = BytesIO()
-            df.to_excel(out, index=False, engine='openpyxl')
-            st.download_button("Download Excel", out.getvalue(), "data.xlsx")
+        if fmt == 'CSV': st.download_button("Download CSV", df.to_csv(index=False).encode(), "data.csv")
+        elif fmt == 'JSON': st.download_button("Download JSON", df.to_json(orient='records'), "data.json")
+        elif fmt == 'Parquet': st.download_button("Download Parquet", df.to_parquet(index=False), "data.parquet")
+        elif fmt == 'Excel': out = BytesIO(); df.to_excel(out, index=False, engine='openpyxl'); st.download_button("Download Excel", out.getvalue(), "data.xlsx")
         else:
-            with st.form("sf_wb"): 
-                tbl = st.text_input("Snowflake table name")
-                sub = st.form_submit_button("Writeback to Snowflake")
-            if sub:
-                conn = get_sf_conn()
-                write_pandas(conn, df, tbl)
-                conn.close()
-                st.success(f"Written back to {tbl}")
+            with st.form("sf_wb"): tbl = st.text_input("Snowflake table"); sub = st.form_submit_button("Writeback")
+            if sub: conn = get_sf_conn(); write_pandas(conn, df, tbl); conn.close(); st.success(f"Written to {tbl}")
 
 # History Tab
+
 def history_tab():
     st.header("6. History")
-    for idx, (ts, snap) in enumerate(st.session_state['versions']):
-        cols = st.columns([0.7, 0.3])
+    for idx,(ts,snap) in enumerate(st.session_state['versions']):
+        cols = st.columns([0.7,0.3])
         cols[0].write(f"{idx+1}. {ts}")
-        if cols[1].button("Revert", key=f"h_{idx}"):
-            st.session_state.datasets[st.session_state.current] = snap
-            st.experimental_rerun()
+        if cols[1].button("Revert", key=f"h_{idx}"): st.session_state.datasets[st.session_state.current]=snap; st.experimental_rerun()
 
 # Snowflake Tab
+
 def snowflake_tab():
     st.header("7. Snowflake Settings")
     st.text_input("Account", key='sf_account')
@@ -297,18 +228,20 @@ def snowflake_tab():
     st.text_input("Schema", key='sf_schema')
 
 # Pipeline Tab
+
 def pipeline_tab():
     st.header("8. Pipeline Configuration as YAML")
     yaml_steps = yaml.dump({'pipeline_steps': st.session_state.steps}, sort_keys=False)
     st.text_area("Pipeline YAML", yaml_steps, height=300)
     st.download_button("Download YAML", yaml_steps, file_name="pipeline.yaml", mime="text/yaml")
 
-# Social Network Graph Tab with PyVis
+# Social Graph Tab
+
 def social_graph_tab():
     st.header("9. Social Network Graph")
     key = st.session_state.current
     if not key:
-        st.info("Select a dataset containing an edge list first.")
+        st.info("Select a dataset containing edge list first.")
         return
     df = st.session_state.datasets[key]
     cols = list(df.columns)
@@ -317,31 +250,26 @@ def social_graph_tab():
     weight_opt = [None] + cols
     weight = st.selectbox("Edge weight column (optional)", weight_opt, key='wt_col')
     if st.button("Generate Graph"):
-        # Build networkx graph
         G = nx.Graph()
         for _, row in df.iterrows():
             if weight and weight != 'None':
                 G.add_edge(row[source], row[target], value=row[weight])
             else:
                 G.add_edge(row[source], row[target])
-        # PyVis network
         net = Network(height="700px", width="100%", bgcolor="#222222", font_color="white")
         net.barnes_hut(gravity=-20000, central_gravity=0.3, spring_length=100, spring_strength=0.001)
-        # Add nodes and edges
-        for n, data in G.nodes(data=True):
-            deg = G.degree(n)
-            net.add_node(n, label=str(n), title=f"Degree: {deg}", value=deg)
+        for n in G.nodes():
+            net.add_node(n, label=str(n), title=f"Degree: {G.degree(n)}", value=G.degree(n))
         for u, v, data in G.edges(data=True):
-            wt = data.get('value', 1)
-            net.add_edge(u, v, value=wt)
+            net.add_edge(u, v, value=data.get('value', 1))
         net.show_buttons(filter_=['physics'])
-        # Render HTML
         html = net.generate_html()
         import streamlit.components.v1 as components
         components.html(html, height=750, scrolling=True)
 
 # Render Tabs
-funcs = [datasets_tab, transform_tab, profile_tab, insights_tab, export_tab, history_tab, snowflake_tab, pipeline_tab, social_graph_tab]
+funcs = [datasets_tab, transform_tab, profile_tab, insights_tab,
+         export_tab, history_tab, snowflake_tab, pipeline_tab, social_graph_tab]
 for fn, tab in zip(funcs, tabs):
     with tab:
         fn()
