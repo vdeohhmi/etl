@@ -22,6 +22,15 @@ for key, default in [('datasets', {}), ('current', None), ('steps', []), ('versi
 
 # --- Helper Functions ---
 def get_sf_conn():
+    # Use correct session state keys for Snowflake credentials
+    return snowflake.connector.connect(
+        user=st.session_state.get('sf_user',''),
+        password=st.session_state.get('sf_password',''),
+        account=st.session_state.get('sf_account',''),
+        warehouse=st.session_state.get('sf_warehouse',''),
+        database=st.session_state.get('sf_database',''),
+        schema=st.session_state.get('sf_schema','')
+    ):
     return snowflake.connector.connect(
         user=st.session_state.get('sf_account',''),
         password=st.session_state.get('sf_password',''),
