@@ -10,6 +10,7 @@ import yaml
 import networkx as nx
 from pyvis.network import Network
 import plotly.express as px
+import re
 
 # --- App Configuration ---
 st.set_page_config(page_title="Data Transformer Pro Plus", layout="wide")
@@ -43,7 +44,6 @@ def load_file(uploader_file):
     return None
 
 def apply_steps(df):
-    # Snapshot current before transformations
     ts = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
     st.session_state.versions.append((ts, df.copy()))
     for step in st.session_state.steps:
@@ -82,23 +82,15 @@ def apply_steps(df):
 
 # --- UI Tabs ---
 tabs = st.tabs([
-    "📂 Datasets",
-    "✏️ Transform",
-    "📈 Profile",
-    "💡 Insights",
-    "⬇️ Export",
-    "🕒 History",
-    "⚙️ Snowflake",
-    "📜 Pipeline",
-    "🕸️ Social Graph"
+    "📂 Datasets","✏️ Transform","📈 Profile","💡 Insights",
+    "⬇️ Export","🕒 History","⚙️ Snowflake","📜 Pipeline","🕸️ Social Graph"
 ])
 
 # 1. Datasets
 with tabs[0]:
     st.subheader("1. Load Data")
-    files = st.file_uploader("Upload files (CSV, Excel, Parquet, JSON)",
-                             type=['csv','xls','xlsx','parquet','json'],
-                             accept_multiple_files=True)
+    files = st.file_uploader("Upload files (CSV/Excel/Parquet/JSON)",
+                             type=['csv','xls','xlsx','parquet','json'], accept_multiple_files=True)
     if files:
         for u in files:
             data = load_file(u)
@@ -107,7 +99,7 @@ with tabs[0]:
                     st.session_state.datasets[f"{u.name}:{sheet}"] = sdf
             elif data is not None:
                 st.session_state.datasets[u.name] = data
-        st.success(f"Loaded {len(files)} files.")
+        st.success(f"Loaded {len(files)} files into session.")
     if st.session_state.datasets:
         sel = st.selectbox("Select dataset", list(st.session_state.datasets.keys()), key='sel')
         st.session_state.current = sel
@@ -122,7 +114,7 @@ with tabs[1]:
     else:
         df = st.session_state.datasets[key]
         for i, s in enumerate(st.session_state.steps):
-            st.markdown(f"**Step {i+1}:** {s['type']} — {s.get('desc','')} ")
+            st.markdown(f"**Step {i+1}:** {s['type']} — {s.get('desc','')}")
         st.markdown("---")
         op = st.selectbox("Operation", ['rename','filter','compute','drop_const','onehot','join','impute'], key='op')
         if op == 'rename':
@@ -135,16 +127,16 @@ with tabs[1]:
         elif op == 'compute':
             newc = st.text_input("New column name for compute")
             expr2 = st.text_input("Formula or SQL (prefix SQL:)")
-            st.write("**Columns:**", list(df.columns))
-            st.write("**Common functions:** np.log(), np.sqrt(), etc.")
-            if st.button("Add Compute"): st.session_state.steps.append({'type':'compute','new':newc,'expr':expr2,'desc':f"Compute {newc}"})
+            st.write("Columns:", list(df.columns))
+            st.write("Common functions: np.log(), np.sqrt(), etc.")
+            if st.button("Add Compute"): st.session_state.steps.append({'type':'compute','new':newc,'expr':expr2,'desc':newc})
         elif op == 'drop_const':
             if st.button("Drop Constant Columns"): st.session_state.steps.append({'type':'drop_const','desc':'Drop constant columns'})
         elif op == 'onehot':
             cols = st.multiselect("Columns to one-hot encode", df.select_dtypes('object').columns)
             if st.button("Add One-Hot"): st.session_state.steps.append({'type':'onehot','cols':cols,'desc':f"One-hot {cols}"})
         elif op == 'join':
-            aux = st.selectbox("Auxiliary dataset to join", [k for k in st.session_state.datasets if k!=key])
+            aux = st.selectbox("Aux dataset to join", [k for k in st.session_state.datasets if k!=key])
             left = st.selectbox("Left key", df.columns)
             right = st.selectbox("Right key", st.session_state.datasets[aux].columns)
             how = st.selectbox("Join type", ['inner','left','right','outer'])
@@ -162,11 +154,7 @@ with tabs[2]:
     key = st.session_state.current
     if key:
         df = st.session_state.datasets[key]
-        profile = pd.DataFrame({
-            'dtype': df.dtypes,
-            'nulls': df.isna().sum(),
-            'null_pct': df.isna().mean()*100
-        })
+        profile = pd.DataFrame({'dtype': df.dtypes,'nulls': df.isna().sum(),'null_pct': df.isna().mean()*100})
         st.dataframe(profile, use_container_width=True)
 
 # 4. Insights
@@ -187,38 +175,45 @@ with tabs[4]:
         df = st.session_state.datasets[key]
         fmt = st.selectbox("Export format", ['CSV','JSON','Parquet','Excel','Snowflake'], key='fmt')
         if st.button("Export Now"):
-            if fmt=='CSV': st.download_button("Download CSV", df.to_csv(index=False).encode(), "data.csv")
-            elif fmt=='JSON': st.download_button("Download JSON", df.to_json(orient='records'), "data.json")
-            elif fmt=='Parquet': st.download_button("Download Parquet", df.to_parquet(index=False), "data.parquet")
-            elif fmt=='Excel': 
-                out=BytesIO(); df.to_excel(out,index=False,engine='openpyxl'); st.download_button("Download Excel", out.getvalue(), "data.xlsx")
+            if fmt == 'CSV': st.download_button("Download CSV", df.to_csv(index=False).encode(), "data.csv")
+            elif fmt == 'JSON': st.download_button("Download JSON", df.to_json(orient='records'), "data.json")
+            elif fmt == 'Parquet': st.download_button("Download Parquet", df.to_parquet(index=False), "data.parquet")
+            elif fmt == 'Excel': out=BytesIO(); df.to_excel(out,index=False,engine='openpyxl'); st.download_button("Download Excel", out.getvalue(), "data.xlsx")
             else:
-                # auto-create and load Snowflake table
-                table_name = st.session_state.current.replace(':','_')
+                # sanitize and uppercase table name
+                raw = st.session_state.current
+                table_name = re.sub(r"[^0-9A-Za-z_]+","_", raw).upper()
                 conn = get_sf_conn()
                 cur = conn.cursor()
-                # create table DDL
-                cols_defs=[]
+                # build DDL
+                cols_defs = []
                 for c,dtype in df.dtypes.items():
                     if pd.api.types.is_integer_dtype(dtype): cols_defs.append(f'"{c}" NUMBER')
                     elif pd.api.types.is_float_dtype(dtype): cols_defs.append(f'"{c}" FLOAT')
                     elif pd.api.types.is_datetime64_dtype(dtype): cols_defs.append(f'"{c}" TIMESTAMP_NTZ')
                     else: cols_defs.append(f'"{c}" VARCHAR({int(df[c].astype(str).map(len).max() or 1)})')
-                ddl=f"CREATE TABLE IF NOT EXISTS {table_name} ({', '.join(cols_defs)})"
-                try: cur.execute(ddl)
-                except Exception as e: st.error(f"DDL failed: {e}")
-                try: write_pandas(conn,df,table_name); st.success(f"Loaded to Snowflake table {table_name}")
-                except Exception as e: st.error(f"Write failed: {e}")
-                cur.close(); conn.close()
+                ddl = f"CREATE TABLE IF NOT EXISTS {table_name} ({', '.join(cols_defs)})"
+                try:
+                    cur.execute(ddl)
+                except Exception as e:
+                    st.error(f"DDL failed: {e}")
+                try:
+                    write_pandas(conn, df, table_name)
+                    st.success(f"Loaded to Snowflake table {table_name}")
+                except Exception as e:
+                    st.error(f"Write failed: {e}")
+                finally:
+                    cur.close()
+                    conn.close()
 
 # 6. History
 with tabs[5]:
     st.subheader("6. Transformation History")
     if st.session_state.versions:
         for i,(ts,snap) in enumerate(st.session_state.versions):
-            cols=st.columns([0.7,0.3])
+            cols = st.columns([0.7,0.3])
             cols[0].write(f"{i+1}. {ts}")
-            if cols[1].button("Revert", key=f"rev{i}"): st.session_state.datasets[st.session_state.current]=snap; st.experimental_rerun()
+            if cols[1].button("Revert", key=f"rev{i}"): st.session_state.datasets[st.session_state.current] = snap; st.experimental_rerun()
 
 # 7. Snowflake Settings
 with tabs[6]:
@@ -233,38 +228,38 @@ with tabs[6]:
 # 8. Pipeline YAML
 with tabs[7]:
     st.subheader("8. Pipeline as YAML")
-    yaml_str=yaml.dump({'pipeline_steps':st.session_state.steps},sort_keys=False)
-    st.text_area("YAML",yaml_str,height=300)
-    st.download_button("Download YAML",yaml_str,"pipeline.yaml")
+    yaml_str = yaml.dump({'pipeline_steps': st.session_state.steps}, sort_keys=False)
+    st.text_area("Pipeline YAML", yaml_str, height=300)
+    st.download_button("Download YAML", yaml_str, "pipeline.yaml")
 
 # 9. Social Graph
 with tabs[8]:
     st.subheader("9. Social Network Graph")
-    key=st.session_state.current
+    key = st.session_state.current
     if key:
-        df=st.session_state.datasets[key]
-        cols=list(df.columns)
-        src=st.selectbox("Source column",cols,key='src')
-        tgt=st.selectbox("Target column",cols,key='tgt')
-        wt_opt=[None]+cols
-        wt=st.selectbox("Weight column",wt_opt,key='wt')
+        df = st.session_state.datasets[key]
+        cols = list(df.columns)
+        src = st.selectbox("Source column", cols, key='src')
+        tgt = st.selectbox("Target column", cols, key='tgt')
+        wt_opt = [None] + cols
+        wt = st.selectbox("Weight column", wt_opt, key='wt')
         if st.button("Generate Graph"):
             G=nx.Graph()
             for _,r in df.iterrows():
                 u,v=r[src],r[tgt]
                 w=float(r[wt]) if wt and pd.notna(r[wt]) else 1
-                if G.has_edge(u,v):G[u][v]['weight']+=w
-                else:G.add_edge(u,v,weight=w)
+                if G.has_edge(u,v): G[u][v]['weight']+=w
+                else: G.add_edge(u,v,weight=w)
             edges=sorted(G.edges(data=True),key=lambda x:x[2]['weight'],reverse=True)
-            top5={(u,v)for u,v,_ in edges[:5]}
+            top5={(u,v) for u,v,_ in edges[:5]}
             net=Network(height='700px',width='100%',bgcolor='#222222',font_color='white')
             net.barnes_hut(gravity=-20000,central_gravity=0.3,spring_length=100,spring_strength=0.001)
-            for n in G.nodes():net.add_node(n,label=str(n),title=f'Degree:{G.degree(n)}',value=G.degree(n))
+            for n in G.nodes(): net.add_node(n,label=str(n),title=f'Degree:{G.degree(n)}',value=G.degree(n))
             for u,v,d in G.edges(data=True):
                 if (u,v) in top5 or (v,u) in top5:
                     net.add_edge(u,v,value=d['weight'],width=4,color='red',title=f"Weight:{d['weight']}")
                 else:
                     net.add_edge(u,v,value=d['weight'],width=1,color='rgba(200,200,200,0.2)',title=f"Weight:{d['weight']}")
             net.show_buttons(filter_=['physics'])
-            html=net.generate_html()
+            html = net.generate_html()
             import streamlit.components.v1 as comp; comp.html(html,height=750,scrolling=True)
