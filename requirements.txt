@@ -6,4 +6,4 @@ openpyxl
 xlrd
 sqlalchemy
 pandasql
-pyyaml
+snowflake-connector-python
