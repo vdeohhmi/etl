@@ -1,5 +1,5 @@
-# app.py
 import os
+import re
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -11,8 +11,10 @@ import yaml
 import networkx as nx
 from pyvis.network import Network
 import plotly.express as px
-import re
 import tableauserverclient as TSC
+from datetime import datetime
+import zipfile
+import io
 
 # --- App Configuration ---
 st.set_page_config(page_title="Data Transformer Pro Plus", layout="wide")
@@ -26,164 +28,187 @@ for key, default in [('datasets', {}), ('current', None), ('steps', []), ('versi
 # --- Helper Functions ---
 def get_sf_conn():
     return snowflake.connector.connect(
-        user=st.session_state.get('sf_user', ''),
-        password=st.session_state.get('sf_password', ''),
-        account=st.session_state.get('sf_account', ''),
-        warehouse=st.session_state.get('sf_warehouse', ''),
-        database=st.session_state.get('sf_database', ''),
-        schema=st.session_state.get('sf_schema', '')
+        user=st.session_state.get('sf_user',''),
+        password=st.session_state.get('sf_password',''),
+        account=st.session_state.get('sf_account',''),
+        warehouse=st.session_state.get('sf_warehouse',''),
+        database=st.session_state.get('sf_database',''),
+        schema=st.session_state.get('sf_schema','')
     )
 
-
-def parse_dates(df: pd.DataFrame) -> pd.DataFrame:
+def parse_dates(df):
+    """Convert any column with 'date' in its name to ISO date strings."""
     for col in df.columns:
         if 'date' in col.lower():
             try:
-                df[col] = pd.to_datetime(df[col], errors='coerce').dt.strftime('%Y-%m-%d')
+                dt = pd.to_datetime(df[col], errors='coerce')
+                df[col] = dt.dt.strftime('%Y-%m-%d')
             except Exception:
                 pass
     return df
-
 
 def load_file(uploader_file):
     ext = uploader_file.name.split('.')[-1].lower()
     try:
         if ext == 'csv':
-            return parse_dates(pd.read_csv(uploader_file))
-        if ext in ['xls', 'xlsx']:
+            df = pd.read_csv(uploader_file)
+            return parse_dates(df)
+        if ext in ['xls','xlsx']:
             sheets = pd.read_excel(uploader_file, sheet_name=None)
-            return {name: parse_dates(df) for name, df in sheets.items()}
+            return {sheet: parse_dates(df) for sheet, df in sheets.items()}
         if ext == 'parquet':
-            return parse_dates(pd.read_parquet(uploader_file))
+            df = pd.read_parquet(uploader_file)
+            return parse_dates(df)
         if ext == 'json':
-            return parse_dates(pd.read_json(uploader_file))
-        if ext == 'twbx':
-            # save the .twbx for further use or publishing
-            path = os.path.join("/tmp", uploader_file.name)
-            with open(path, "wb") as f:
-                f.write(uploader_file.getbuffer())
-            st.success(f"Uploaded {uploader_file.name}")
-            return None
+            df = pd.read_json(uploader_file)
+            return parse_dates(df)
     except Exception as e:
         st.error(f"Failed to load {uploader_file.name}: {e}")
     return None
 
-
-def apply_steps(df: pd.DataFrame) -> pd.DataFrame:
-    timestamp = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
-    st.session_state.versions.append((timestamp, df.copy()))
+def apply_steps(df):
+    ts = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    st.session_state.versions.append((ts, df.copy()))
     for step in st.session_state.steps:
-        typ = step['type']
-        if typ == 'rename':
+        t = step['type']
+        if t == 'rename':
             df = df.rename(columns={step['old']: step['new']})
-        elif typ == 'filter' and step.get('expr'):
-            try:
-                df = df.query(step['expr'])
-            except:
-                pass
-        elif typ == 'compute' and step.get('expr'):
+        elif t == 'filter' and step.get('expr'):
+            try: df = df.query(step['expr'])
+            except: pass
+        elif t == 'compute' and step.get('expr'):
             expr = step['expr']
             if expr.lower().startswith('sql:'):
-                try:
-                    df = sqldf(expr[4:], {'df': df})
-                except:
-                    pass
+                try: df = sqldf(expr[4:], {'df': df})
+                except: pass
             else:
-                try:
-                    df[step['new']] = df.eval(expr)
-                except:
-                    pass
-        elif typ == 'drop_const':
+                try: df[step['new']] = df.eval(expr)
+                except: pass
+        elif t == 'drop_const':
             df = df.loc[:, df.nunique() > 1]
-        elif typ == 'onehot':
+        elif t == 'onehot':
             df = pd.get_dummies(df, columns=step['cols'])
-        elif typ == 'join':
+        elif t == 'join':
             aux = st.session_state.datasets.get(step['aux'])
-            if isinstance(aux, pd.DataFrame):
-                df = df.merge(aux, left_on=step['left'], right_on=step['right'], how=step['how'])
-        elif typ == 'impute':
+            if aux is not None:
+                df = df.merge(aux,
+                              left_on=step['left'],
+                              right_on=step['right'],
+                              how=step['how'])
+        elif t == 'impute':
             for c in df.columns:
                 if df[c].isna().any():
-                    df[c] = df[c].fillna(df[c].median() if pd.api.types.is_numeric_dtype(df[c]) else df[c].mode().iloc[0])
+                    df[c] = df[c].fillna(
+                        df[c].median() if pd.api.types.is_numeric_dtype(df[c]) else df[c].mode().iloc[0]
+                    )
     return df
 
 # --- UI Tabs ---
 tabs = st.tabs([
-    "📂 Datasets",
-    "✏️ Transform",
-    "📈 Profile",
-    "💡 Insights",
-    "⬇️ Export",
-    "🕒 History",
-    "⚙️ Snowflake",
-    "📜 Pipeline",
-    "🕸️ Social Graph",
-    "🔗 Tableau Writeback"
+    "📂 Datasets", "✏️ Transform", "📈 Profile", "💡 Insights",
+    "⬇️ Export", "📊 Tableau Dashboard", "🕒 History", "⚙️ Snowflake",
+    "📜 Pipeline", "🕸️ Social Graph"
 ])
 
-# 1. Datasets
+# 1. Load Data
 with tabs[0]:
     st.subheader("1. Load Data")
     files = st.file_uploader(
-        "Upload files (CSV/Excel/Parquet/JSON/TWBX)",
-        type=['csv', 'xls', 'xlsx', 'parquet', 'json', 'twbx'],
-        accept_multiple_files=True
+        "Upload files (CSV/Excel/Parquet/JSON)",
+        type=['csv','xls','xlsx','parquet','json'], accept_multiple_files=True
     )
     if files:
-        for file in files:
-            data = load_file(file)
+        for u in files:
+            data = load_file(u)
             if isinstance(data, dict):
-                for sheet, df in data.items():
-                    st.session_state.datasets[f"{file.name}:{sheet}"] = df
-            elif isinstance(data, pd.DataFrame):
-                st.session_state.datasets[file.name] = data
+                for sheet, sdf in data.items():
+                    st.session_state.datasets[f"{u.name}:{sheet}"] = sdf
+            elif data is not None:
+                st.session_state.datasets[u.name] = data
+        st.success(f"Loaded {len(files)} files into session.")
     if st.session_state.datasets:
-        key = st.selectbox("Select dataset", list(st.session_state.datasets.keys()), key='sel')
-        st.session_state.current = key
-        st.data_editor(st.session_state.datasets[key], key=f"editor_{key}", use_container_width=True)
+        sel = st.selectbox("Select dataset", list(st.session_state.datasets.keys()), key='sel_dataset')
+        st.session_state.current = sel
+        st.data_editor(
+            st.session_state.datasets[sel], key=f"editor_{sel}", use_container_width=True
+        )
 
-# 2. Transform
+# 2. Build Transformations
 with tabs[1]:
-    st.subheader("2. Transform Data")
+    st.subheader("2. Build Transformations")
     key = st.session_state.current
     if not key:
         st.info("Please load a dataset first.")
     else:
         df = st.session_state.datasets[key]
-        for i, step in enumerate(st.session_state.steps):
-            st.markdown(f"**Step {i+1}:** {step['type']} — {step.get('desc','')}")
+        for i, s in enumerate(st.session_state.steps):
+            st.markdown(f"**Step {i+1}:** {s['type']} — {s.get('desc','')} ")
         st.markdown("---")
-        op = st.selectbox("Operation", ['rename','filter','compute','drop_const','onehot','join','impute'], key='op')
-        # [Add operations as before]...
-        if st.button("Apply Transformations"):
+        op = st.selectbox(
+            "Operation", ['rename','filter','compute','drop_const','onehot','join','impute'], key='op'
+        )
+        if op == 'rename':
+            old = st.selectbox("Old column name", df.columns)
+            new = st.text_input("New column name")
+            if st.button("Add Rename"): 
+                st.session_state.steps.append({'type':'rename','old':old,'new':new,'desc':f"Rename {old}→{new}"})
+        elif op == 'filter':
+            expr = st.text_input("Filter expression (pandas query)")
+            if st.button("Add Filter"): 
+                st.session_state.steps.append({'type':'filter','expr':expr,'desc':expr})
+        elif op == 'compute':
+            newc = st.text_input("New column name for compute")
+            expr2 = st.text_input("Formula or SQL (prefix SQL:)")
+            st.write("**Columns:**", list(df.columns))
+            st.write("**Common functions:** np.log(), np.sqrt(), etc.")
+            if st.button("Add Compute"): 
+                st.session_state.steps.append({'type':'compute','new':newc,'expr':expr2,'desc':newc})
+        elif op == 'drop_const':
+            if st.button("Drop Constant Columns"): 
+                st.session_state.steps.append({'type':'drop_const','desc':'Drop constant columns'})
+        elif op == 'onehot':
+            cols = st.multiselect("Columns to one-hot encode", df.select_dtypes('object').columns)
+            if st.button("Add One-Hot"): 
+                st.session_state.steps.append({'type':'onehot','cols':cols,'desc':f"One-hot {cols}"})
+        elif op == 'join':
+            aux = st.selectbox("Aux dataset to join", [k for k in st.session_state.datasets if k!=key])
+            left = st.selectbox("Left key", df.columns)
+            right = st.selectbox("Right key", st.session_state.datasets[aux].columns)
+            how = st.selectbox("Join type", ['inner','left','right','outer'])
+            if st.button("Add Join"): 
+                st.session_state.steps.append({'type':'join','aux':aux,'left':left,'right':right,'how':how,'desc':f"Join {aux}"})
+        elif op == 'impute':
+            if st.button("Auto Impute Missing"): 
+                st.session_state.steps.append({'type':'impute','desc':'Auto-impute missing'})
+        if st.button("Apply Transformations"): 
             st.session_state.datasets[key] = apply_steps(df)
             st.success("Transformations applied.")
-        st.data_editor(st.session_state.datasets[key], key=f"transformed_{key}", use_container_width=True)
+        st.data_editor(
+            st.session_state.datasets[key], key=f"transformed_{key}", use_container_width=True
+        )
 
-# 3. Profile
+# 3. Data Profile
 with tabs[2]:
     st.subheader("3. Data Profile")
     key = st.session_state.current
     if key:
         df = st.session_state.datasets[key]
         profile = pd.DataFrame({
-            'dtype': df.dtypes,
-            'nulls': df.isna().sum(),
-            'null_pct': df.isna().mean()*100
+            'dtype': df.dtypes, 'nulls': df.isna().sum(), 'null_%': df.isna().mean()*100
         })
         st.dataframe(profile, use_container_width=True)
 
-# 4. Insights
+# 4. Auto Insights
 with tabs[3]:
     st.subheader("4. Auto Insights")
     key = st.session_state.current
     if key:
         df = st.session_state.datasets[key]
-        num = df.select_dtypes(include=np.number)
+        num = df.select_dtypes('number')
         if not num.empty:
             st.plotly_chart(px.imshow(num.corr(), text_auto=True), use_container_width=True)
 
-# 5. Export
+# 5. Export & Writeback
 with tabs[4]:
     st.subheader("5. Export & Writeback")
     key = st.session_state.current
@@ -191,23 +216,75 @@ with tabs[4]:
         df = st.session_state.datasets[key]
         fmt = st.selectbox("Export format", ['CSV','JSON','Parquet','Excel','Snowflake'], key='fmt')
         if st.button("Export Now"):
-            # [Export logic as before]...
-            pass
+            if fmt == 'CSV': st.download_button("Download CSV", df.to_csv(index=False).encode(), "data.csv")
+            elif fmt == 'JSON': st.download_button("Download JSON", df.to_json(orient='records'), "data.json")
+            elif fmt == 'Parquet': st.download_button("Download Parquet", df.to_parquet(index=False), "data.parquet")
+            elif fmt == 'Excel': out=BytesIO(); df.to_excel(out,index=False,engine='openpyxl'); st.download_button("Download Excel", out.getvalue(), "data.xlsx")
+            else:
+                raw = st.session_state.current
+                table_name = re.sub(r"[^0-9A-Z_]+","_",raw.upper())
+                conn = get_sf_conn()
+                cur = conn.cursor()
+                cols_defs=[]
+                for c,dtype in df.dtypes.items():
+                    if pd.api.types.is_integer_dtype(dtype): cols_defs.append(f'"{c}" NUMBER')
+                    elif pd.api.types.is_float_dtype(dtype): cols_defs.append(f'"{c}" FLOAT')
+                    elif pd.api.types.is_datetime64_dtype(dtype): cols_defs.append(f'"{c}" TIMESTAMP_NTZ')
+                    else: cols_defs.append(f'"{c}" VARCHAR({int(df[c].astype(str).map(len).max() or 1)})')
+                ddl=f"CREATE TABLE IF NOT EXISTS {table_name} ({', '.join(cols_defs)})"
+                try: cur.execute(ddl)
+                except Exception as e: st.error(f"DDL failed: {e}")
+                try: write_pandas(conn, df, table_name); st.success(f"Loaded to Snowflake table {table_name}")
+                except Exception as e: st.error(f"Write failed: {e}")
+                finally: cur.close(); conn.close()
 
-# 6. History
+# 6. Tableau Dashboard
 with tabs[5]:
-    st.subheader("6. Transformation History")
+    st.subheader("6. Tableau Dashboard Display & Comment")
+    embed_url = st.text_input("Enter Tableau dashboard embed URL (Public/Server)")
+    if embed_url:
+        iframe = f"<iframe src=\"{embed_url}\" width=100% height=800></iframe>"
+        st.components.v1.html(iframe, height=800)
+    uploaded_dash = st.file_uploader("Or upload .twb/.twbx file", type=['twb','twbx'], key='dash')
+    if uploaded_dash:
+        data = uploaded_dash.read()
+        if uploaded_dash.name.lower().endswith('.twbx'):
+            z = zipfile.ZipFile(io.BytesIO(data))
+            preview = next((f for f in z.namelist() if f.lower().endswith(('.png','.jpg','.jpeg'))), None)
+            if preview: st.image(z.read(preview), caption='Preview')
+            else: st.info("No preview found in .twbx")
+        else:
+            try: st.text_area("XML Preview", data.decode('utf-8', errors='ignore')[:1000], height=300)
+            except: st.text("Cannot display .twb content.")
+    conn = get_sf_conn(); cur = conn.cursor()
+    match_name = uploaded_dash.name if uploaded_dash else None
+    cur.execute("SELECT FILE_NAME, EMBED_URL, COMMENT, CREATED_AT FROM DASHBOARD_COMMENTS WHERE EMBED_URL=%s OR FILE_NAME=%s ORDER BY CREATED_AT DESC", (embed_url, match_name))
+    comments = cur.fetchall(); cur.close(); conn.close()
+    if comments:
+        st.subheader("Existing Comments")
+        for fn,url,comm,ts in comments: st.markdown(f"- **{ts}** on `{url or fn}`: {comm}")
+    new_comm = st.text_area("Add your comment", height=100)
+    if st.button("Submit Comment"):
+        conn = get_sf_conn(); cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS DASHBOARD_COMMENTS (FILE_NAME VARCHAR, EMBED_URL VARCHAR, COMMENT VARCHAR, CREATED_AT TIMESTAMP_NTZ)")
+        now = datetime.utcnow()
+        cur.execute("INSERT INTO DASHBOARD_COMMENTS (FILE_NAME, EMBED_URL, COMMENT, CREATED_AT) VALUES (%s,%s,%s,%s)", (match_name, embed_url, new_comm, now))
+        conn.commit(); st.success("Comment submitted."); cur.close(); conn.close()
+
+# 7. Transformation History
+with tabs[6]:
+    st.subheader("7. Transformation History")
     if st.session_state.versions:
         for i,(ts,snap) in enumerate(st.session_state.versions):
-            cols=st.columns([0.7,0.3])
+            cols = st.columns([0.7,0.3])
             cols[0].write(f"{i+1}. {ts}")
-            if cols[1].button("Revert",key=f"rev{i}"):
-                st.session_state.datasets[st.session_state.current]=snap
+            if cols[1].button("Revert", key=f"rev{i}"):
+                st.session_state.datasets[st.session_state.current] = snap
                 st.experimental_rerun()
 
-# 7. Snowflake Settings
-with tabs[6]:
-    st.subheader("7. Snowflake Configuration")
+# 8. Snowflake Configuration
+with tabs[7]:
+    st.subheader("8. Snowflake Configuration")
     st.text_input("Account", key='sf_account')
     st.text_input("Username", key='sf_user')
     st.text_input("Password", type='password', key='sf_password')
@@ -215,46 +292,48 @@ with tabs[6]:
     st.text_input("Database", key='sf_database')
     st.text_input("Schema", key='sf_schema')
 
-# 8. Pipeline YAML
-with tabs[7]:
-    st.subheader("8. Pipeline as YAML")
-    yaml_str=yaml.dump({'pipeline_steps':st.session_state.steps},sort_keys=False)
-    st.text_area("Pipeline YAML",yaml_str,height=300)
-    st.download_button("Download YAML",yaml_str,"pipeline.yaml")
-
-# 9. Social Graph
+# 9. Pipeline as YAML
 with tabs[8]:
-    st.subheader("9. Social Network Graph")
-    # [Social graph logic as before]...
+    st.subheader("9. Pipeline as YAML")
+    yaml_str = yaml.dump({'pipeline_steps': st.session_state.steps}, sort_keys=False)
+    st.text_area("Pipeline YAML", yaml_str, height=300)
+    st.download_button("Download YAML", yaml_str, "pipeline.yaml")
 
-# 10. Tableau Writeback
+# 10. Social Network Graph
 with tabs[9]:
-    st.subheader("🔗 Tableau Writeback to Snowflake")
-    twbx_file = st.file_uploader("Upload Tableau Packaged Workbook (.twbx)", type=['twbx'])
-    workbook_url = st.text_input("Or enter Tableau workbook URL:")
-    if workbook_url:
-        st.markdown("**Preview:**")
-        import streamlit.components.v1 as components
-        components.iframe(workbook_url, height=600)
-    comment_text = st.text_area("Add your comment on this workbook:")
-    if st.button("Submit Comment"):
-        if not (workbook_url or twbx_file) or not comment_text:
-            st.error("Provide a workbook link/file and a comment.")
-        else:
-            dfc = pd.DataFrame([{
-                'workbook': workbook_url if workbook_url else twbx_file.name,
-                'comment': comment_text,
-                'timestamp': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
-            }])
-            conn=get_sf_conn(); cur=conn.cursor()
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS TABLEAU_COMMENTS (
-                  workbook VARCHAR,
-                  comment VARCHAR,
-                  timestamp TIMESTAMP_NTZ
-                )""")
-            cur.close()
-            success,_,nrows,_=write_pandas(conn,dfc,'TABLEAU_COMMENTS')
-            conn.close()
-            if success: st.success(f"Comment written ({nrows} rows).")
-            else: st.error("Write-back failed.")
+    st.subheader("10. Social Network Graph")
+    key = st.session_state.current
+    if key:
+        df = st.session_state.datasets[key]
+        cols = list(df.columns)
+        src = st.selectbox("Source column", cols, key='src')
+        tgt = st.selectbox("Target column", cols, key='tgt')
+        wt_opt = [None] + cols
+        wt = st.selectbox("Weight column", wt_opt, key='wt')
+        if st.button("Generate Graph"):
+            G = nx.Graph()
+            for _,r in df.iterrows():
+                u,v = r[src],r[tgt]
+                w = float(r[wt]) if wt and pd.notna(r[wt]) else 1
+                if G.has_edge(u,v): G[u][v]['weight'] += w
+                else: G.add_edge(u,v,weight=w)
+            edges = sorted(G.edges(data=True), key=lambda x:x[2]['weight'], reverse=True)
+            top5_edges = {(u,v) for u,v,_ in edges[:5]}
+            degree_list = sorted(G.degree(), key=lambda x:x[1], reverse=True)
+            top5_nodes = {n for n,d in degree_list[:5]}
+            net = Network(height='700px',width='100%',bgcolor='#222222',font_color='white')
+            net.barnes_hut(gravity=-20000,central_gravity=0.3,spring_length=100,spring_strength=0.001)
+            for n in G.nodes():
+                deg=G.degree(n)
+                if n in top5_nodes:
+                    net.add_node(n,label=str(n),title=f'Degree:{deg}',value=deg*2,color='orange')
+                else:
+                    net.add_node(n,label=str(n),title=f'Degree:{deg}',value=deg)
+            for u,v,d in G.edges(data=True):
+                if (u,v) in top5_edges or (v,u) in top5_edges:
+                    net.add_edge(u,v,value=d['weight'],width=4,color='red',title=f"Weight:{d['weight']}")
+                else:
+                    net.add_edge(u,v,value=d['weight'],width=1,color='rgba(200,200,200,0.2)',title=f"Weight:{d['weight']}")
+            net.show_buttons(filter_=['physics'])
+            html = net.generate_html()
+            st.components.v1.html(html,height=750,scrolling=True)
