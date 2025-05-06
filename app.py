@@ -15,23 +15,25 @@ if 'db_engine' not in st.session_state:
 # --- File Loading ---
 def load_file(uploaded_file):
     name = uploaded_file.name.lower()
-    if name.endswith('.csv'):
-        return {'Sheet1': pd.read_csv(uploaded_file)}
-    if name.endswith(('.xls', '.xlsx')):
-        return pd.read_excel(uploaded_file, sheet_name=None)
-    if name.endswith('.json'):
-        return {'Data': pd.read_json(uploaded_file)}
-    if name.endswith('.parquet'):
-        return {'Data': pd.read_parquet(uploaded_file)}
-    st.error('Unsupported file type')
+    try:
+        if name.endswith('.csv'):
+            return {'Sheet1': pd.read_csv(uploaded_file)}
+        if name.endswith(('.xls', '.xlsx')):
+            engine = 'xlrd' if name.endswith('.xls') else 'openpyxl'
+            return pd.read_excel(uploaded_file, sheet_name=None, engine=engine)
+        if name.endswith('.json'):
+            return {'Data': pd.read_json(uploaded_file)}
+        if name.endswith('.parquet'):
+            return {'Data': pd.read_parquet(uploaded_file)}
+    except Exception as e:
+        st.error(f"Failed to parse file: {e}")
+    st.error('Unsupported or corrupt file type')
     return {}
 
 # --- Cleaning Utilities ---
 def auto_clean(df):
-    # Trim whitespace & lowercase text
     for col in df.select_dtypes(include='object').columns:
-        df[col] = df[col].str.strip().str.lower()
-    # Fill numeric nulls with median
+        df[col] = df[col].astype(str).str.strip().str.lower()
     for col in df.select_dtypes(include='number').columns:
         df[col].fillna(df[col].median(), inplace=True)
     return df
@@ -63,13 +65,11 @@ def apply_steps(df):
             df = pd.melt(df, id_vars=step['id_vars'], value_vars=step['value_vars'])
         elif op == 'trim':
             for col in step['columns']:
-                df[col] = df[col].str.strip()
+                df[col] = df[col].astype(str).str.strip()
         elif op == 'case':
-            func = step['case']; cols = step['columns']
+            func, cols = step['case'], step['columns']
             for col in cols:
-                if func == 'lower': df[col] = df[col].str.lower()
-                if func == 'upper': df[col] = df[col].str.upper()
-                if func == 'title': df[col] = df[col].str.title()
+                df[col] = getattr(df[col].str, func)()
         elif op == 'dedupe':
             df = df.drop_duplicates(subset=step['subset'] or None, keep=step['keep'])
         elif op == 'impute':
@@ -84,7 +84,7 @@ def apply_steps(df):
                 df[col] = pd.to_datetime(df[col], format=step['format'], errors='coerce')
         elif op == 'remove_special':
             for col in step['columns']:
-                df[col] = df[col].str.replace(r'[^\w\s]', '', regex=True)
+                df[col] = df[col].astype(str).str.replace(r'[^\w\s]', '', regex=True)
         elif op == 'outlier':
             df = outlier_removal(df, step['columns'], step['threshold'])
         elif op == 'auto_clean':
@@ -92,9 +92,9 @@ def apply_steps(df):
     return df
 
 # --- UI ---
-st.title('🚀 Advanced Data Transformer')
+st.title('🚀 Advanced Business Data Transformer')
 
-uploaded = st.file_uploader('Upload file', type=['csv','xls','xlsx','json','parquet'])
+uploaded = st.file_uploader('Upload file (CSV, XLS/XLSX, JSON, Parquet)', type=['csv','xls','xlsx','json','parquet'])
 if not uploaded:
     st.info('Please upload a file to begin')
     st.stop()
@@ -106,7 +106,7 @@ df_orig = datasets[sheet].copy()
 # Sidebar: Steps
 st.sidebar.header('Transformation Steps')
 for i, s in enumerate(st.session_state.steps):
-    st.sidebar.write(f"{i+1}. {s['operation']} - {s.get('description','')}  ")
+    st.sidebar.write(f"{i+1}. {s['operation']} - {s.get('description','')}")
 with st.sidebar.expander('Add Step'):
     op = st.selectbox('Operation', [
         'rename','filter','compute','drop','sort','pivot','melt',
@@ -151,24 +151,23 @@ with st.sidebar.expander('Add Step'):
         keep = st.selectbox('Keep', ['first','last','none'])
         if st.button('Add'): st.session_state.steps.append({'operation':'dedupe','subset':cols,'keep':keep,'description':'dedupe'})
     elif op == 'impute':
-        cols = st.multiselect('Columns', df_orig.select_dtypes(include='number').columns.tolist())
+        cols = st.multiselect('Cols', df_orig.select_dtypes(include='number').columns.tolist())
         strat = st.selectbox('Strategy', ['mean','median','mode','constant'])
-        const = None
-        if strat == 'constant': const = st.text_input('Constant value')
+        const = st.text_input('Constant value') if strat=='constant' else None
         if st.button('Add'): st.session_state.steps.append({'operation':'impute','columns':cols,'strategy':strat,'constant':const,'description':'impute'})
     elif op == 'parse_date':
-        cols = st.multiselect('Columns', [c for c in df_orig.columns if df_orig[c].dtype == 'object'])
-        fmt = st.text_input('Format', value='%Y-%m-%d')
+        cols = st.multiselect('Cols', df_orig.select_dtypes(include='object').columns.tolist())
+        fmt = st.text_input('Format', '%Y-%m-%d')
         if st.button('Add'): st.session_state.steps.append({'operation':'parse_date','columns':cols,'format':fmt,'description':'parse_date'})
     elif op == 'remove_special':
-        cols = st.multiselect('Columns', df_orig.select_dtypes(include='object').columns.tolist())
+        cols = st.multiselect('Cols', df_orig.select_dtypes(include='object').columns.tolist())
         if st.button('Add'): st.session_state.steps.append({'operation':'remove_special','columns':cols,'description':'remove_special'})
     elif op == 'outlier':
-        cols = st.multiselect('Columns', df_orig.select_dtypes(include='number').columns.tolist())
-        thr = st.number_input('Z-score threshold', value=3.0)
+        cols = st.multiselect('Cols', df_orig.select_dtypes(include='number').columns.tolist())
+        thr = st.number_input('Z-threshold', value=3.0)
         if st.button('Add'): st.session_state.steps.append({'operation':'outlier','columns':cols,'threshold':thr,'description':'outlier'})
     elif op == 'auto_clean':
-        if st.button('Add Clean'): st.session_state.steps.append({'operation':'auto_clean','description':'auto_clean'})
+        if st.button('Add'): st.session_state.steps.append({'operation':'auto_clean','description':'auto_clean'})
     if st.button('Clear All'): st.session_state.steps.clear(); st.experimental_rerun()
 
 # Apply and display
@@ -179,35 +178,33 @@ with col1:
 with col2:
     if st.checkbox('Show Transformed'): st.dataframe(df_transformed)
 
-# Download
-tab = st.tabs(['Download','Load & Access'])[1]
-with st.tab('Download'):
+# Download and Load
+tabs = st.tabs(['Download','Load & Access'])
+with tabs[0]:
     csv = df_transformed.to_csv(index=False).encode('utf-8')
     st.download_button('Download CSV', csv, file_name=f'transformed_{sheet}.csv')
     if uploaded.name.lower().endswith(('.xls','.xlsx')):
         out = BytesIO();
         with pd.ExcelWriter(out, engine='xlsxwriter') as w: df_transformed.to_excel(w, sheet_name=sheet, index=False); w.save()
         st.download_button('Download Excel', out.getvalue(), file_name=f'transformed_{sheet}.xlsx')
-
-with st.tab('Load & Access'):
-    db_url = st.text_input('Database URL', value=os.getenv('DATABASE_URL',''))
-    if st.button('Connect to DB'):
+with tabs[1]:
+    db_url = st.text_input('Database URL', os.getenv('DATABASE_URL',''))
+    if st.button('Connect DB'):
         try:
             eng = create_engine(db_url)
             st.session_state.db_engine = eng
-            st.success('Connected')
+            st.success('DB Connected')
         except Exception as e: st.error(e)
     if st.session_state.db_engine:
         eng = st.session_state.db_engine
-        insp = inspect(eng)
-        tables = insp.get_table_names()
-        tbl = st.selectbox('Existing Tables', tables)
+        tables = inspect(eng).get_table_names()
+        tbl = st.selectbox('Table to Load', tables)
         if st.button('Load Table'):
             df_db = pd.read_sql_table(tbl, eng)
             st.dataframe(df_db)
-        new_tbl = st.text_input('Save as Table', value=f"transformed_{sheet}" )
+        new_tbl = st.text_input('Save As', f"transformed_{sheet}")
         if st.button('Save to DB'):
             try:
                 df_transformed.to_sql(new_tbl, eng, if_exists='replace', index=False)
-                st.success(f'Saved as {new_tbl}')
+                st.success(f'Saved to {new_tbl}')
             except Exception as e: st.error(e)
