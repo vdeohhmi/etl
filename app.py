@@ -33,11 +33,13 @@ def get_sf_conn():
     )
 
 def parse_dates(df):
-    """Automatically parse columns containing 'date' into datetime objects."""
+    """Automatically parse columns containing 'date' into formatted date strings."""
     for col in df.columns:
         if 'date' in col.lower():
             try:
-                df[col] = pd.to_datetime(df[col], errors='coerce')
+                # Convert to datetime, then format as ISO date string
+                dt = pd.to_datetime(df[col], errors='coerce')
+                df[col] = dt.dt.strftime('%Y-%m-%d')
             except Exception:
                 pass
     return df
