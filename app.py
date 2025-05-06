@@ -8,6 +8,9 @@ from pandasql import sqldf
 import snowflake.connector
 from snowflake.connector.pandas_tools import write_pandas
 import plotly.express as px
+import plotly.graph_objects as go
+import plotly.graph_objects as go
+import plotly.graph_objects as go
 import networkx as nx
 from datetime import datetime
 import yaml
