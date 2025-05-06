@@ -120,21 +120,17 @@ with tabs[1]:
             expr = st.text_input("Filter expression")
             if st.button("Add Filter"): st.session_state.steps.append({'type':'filter','expr':expr,'desc':expr})
         if op=='compute':
-            newc = st.text_input("New column")
-            expr2 = st.text_input("Formula or SQL:")
-            if st.button("Add Compute"): st.session_state.steps.append({'type':'compute','new':newc,'expr':expr2,'desc':newc})
-        if op=='drop_const' and st.button("Add Drop Constants"): st.session_state.steps.append({'type':'drop_const','desc':'Drop constants'})
-        if op=='onehot':
-            cols = st.multiselect("Cols to encode", df.select_dtypes('object').columns)
-            if st.button("Add One-Hot"): st.session_state.steps.append({'type':'onehot','cols':cols,'desc':','.join(cols)})
-        if op=='join':
-            aux = st.selectbox("Aux dataset", [k for k in st.session_state.datasets if k!=key])
-            left=st.selectbox("Left key", df.columns)
-            right=st.selectbox("Right key", st.session_state.datasets[aux].columns)
-            how=st.selectbox("How",['inner','left','right','outer'])
-            if st.button("Add Join"): st.session_state.steps.append({'type':'join','aux':aux,'left':left,'right':right,'how':how,'desc':f"Join {aux}"})
-        if op=='impute' and st.button("Add Impute"): st.session_state.steps.append({'type':'impute','desc':'Auto-impute'})
-        if st.button("Apply"): st.session_state.datasets[key]=apply_steps(df); st.success("Applied steps.")
+        newc = st.text_input("New column", help="Name for the computed column.")
+        # Auto-suggest helper: show available columns and functions
+        st.write("**Available columns:**", df.columns.tolist())
+        st.write("**Common functions:** `np.log()`, `np.sqrt()`, `np.mean()`, `np.sum()`, prefix with `SQL:` for queries")
+        expr2 = st.text_input("Formula or SQL:", help="Enter a pandas eval formula or prefix a SQL query with SQL:")
+        if st.button("Add Compute", key='btn_compute'):
+            st.session_state.steps.append({'type':'compute','new':newc,'expr':expr2,'desc':f"Compute {newc}={expr2}"})
+        # end compute
+        if st.button("Apply", key='btn_apply'):
+            st.session_state.datasets[key] = apply_steps(df)
+            st.success("Applied steps.") st.session_state.datasets[key]=apply_steps(df); st.success("Applied steps.")
         st.data_editor(st.session_state.datasets[key], key=f"transformed_{key}", use_container_width=True)
 
 # Profile Tab
