@@ -303,12 +303,12 @@ def pipeline_tab():
     st.text_area("Pipeline YAML", yaml_steps, height=300)
     st.download_button("Download YAML", yaml_steps, file_name="pipeline.yaml", mime="text/yaml")
 
-# Social Graph Tab
+# Social Network Graph Tab with PyVis
 def social_graph_tab():
     st.header("9. Social Network Graph")
     key = st.session_state.current
     if not key:
-        st.info("Select a dataset containing edge list first.")
+        st.info("Select a dataset containing an edge list first.")
         return
     df = st.session_state.datasets[key]
     cols = list(df.columns)
@@ -317,30 +317,28 @@ def social_graph_tab():
     weight_opt = [None] + cols
     weight = st.selectbox("Edge weight column (optional)", weight_opt, key='wt_col')
     if st.button("Generate Graph"):
-        G = nx.DiGraph() if weight else nx.Graph()
-        if weight:
-            for _, row in df.iterrows():
-                G.add_edge(row[source], row[target], weight=row[weight])
-        else:
-            for _, row in df.iterrows():
+        # Build networkx graph
+        G = nx.Graph()
+        for _, row in df.iterrows():
+            if weight and weight != 'None':
+                G.add_edge(row[source], row[target], value=row[weight])
+            else:
                 G.add_edge(row[source], row[target])
-        pos = nx.spring_layout(G)
-        edge_x, edge_y = [], []
-        for e in G.edges():
-            x0, y0 = pos[e[0]]
-            x1, y1 = pos[e[1]]
-            edge_x += [x0, x1, None]
-            edge_y += [y0, y1, None]
-        edge_trace = px.line(x=edge_x, y=edge_y).update_traces(line=dict(width=1,color='#888'), hoverinfo='none')
-        node_x, node_y, node_text = [], [], []
-        for n in G.nodes():
-            x, y = pos[n]
-            node_x.append(x)
-            node_y.append(y)
-            node_text.append(str(n))
-        node_trace = px.scatter(x=node_x, y=node_y, text=node_text).update_traces(marker=dict(size=10, color=[len(list(G.adj[n])) for n in G.nodes()], showscale=True, colorbar=dict(title='Degree')), textposition='top center')
-        fig = go.Figure(data=edge_trace.data + node_trace.data, layout=go.Layout(showlegend=False, hovermode='closest', margin=dict(b=20,l=5,r=5,t=40)))
-        st.plotly_chart(fig, use_container_width=True)
+        # PyVis network
+        net = Network(height="700px", width="100%", bgcolor="#222222", font_color="white")
+        net.barnes_hut(gravity=-20000, central_gravity=0.3, spring_length=100, spring_strength=0.001)
+        # Add nodes and edges
+        for n, data in G.nodes(data=True):
+            deg = G.degree(n)
+            net.add_node(n, label=str(n), title=f"Degree: {deg}", value=deg)
+        for u, v, data in G.edges(data=True):
+            wt = data.get('value', 1)
+            net.add_edge(u, v, value=wt)
+        net.show_buttons(filter_=['physics'])
+        # Render HTML
+        html = net.generate_html()
+        import streamlit.components.v1 as components
+        components.html(html, height=750, scrolling=True)
 
 # Render Tabs
 funcs = [datasets_tab, transform_tab, profile_tab, insights_tab, export_tab, history_tab, snowflake_tab, pipeline_tab, social_graph_tab]
