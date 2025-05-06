@@ -31,16 +31,22 @@ def get_sf_conn():
         schema=st.session_state.get('sf_schema','')
     )
 
+
 def load_file(uploader_file):
     ext = uploader_file.name.split('.')[-1].lower()
     try:
-        if ext == 'csv': return pd.read_csv(uploader_file)
-        if ext in ['xls', 'xlsx']: return pd.read_excel(uploader_file, sheet_name=None)
-        if ext == 'parquet': return pd.read_parquet(uploader_file)
-        if ext == 'json': return pd.read_json(uploader_file)
+        if ext == 'csv':
+            return pd.read_csv(uploader_file)
+        if ext in ['xls', 'xlsx']:
+            return pd.read_excel(uploader_file, sheet_name=None)
+        if ext == 'parquet':
+            return pd.read_parquet(uploader_file)
+        if ext == 'json':
+            return pd.read_json(uploader_file)
     except Exception as e:
         st.error(f"Failed to load {uploader_file.name}: {e}")
     return None
+
 
 def apply_steps(df):
     # snapshot version
@@ -68,12 +74,15 @@ def apply_steps(df):
         elif t == 'join':
             aux = st.session_state.datasets.get(step['aux'])
             if aux is not None:
-                df = df.merge(aux, left_on=step['left'], right_on=step['right'], how=step['how'])
+                df = df.merge(aux,
+                              left_on=step['left'],
+                              right_on=step['right'],
+                              how=step['how'])
         elif t == 'impute':
             for c in df.columns:
                 if df[c].isna().any():
                     df[c] = df[c].fillna(
-                        df[c].median() if pd.api.types.is_numeric_dtype(df[c]) 
+                        df[c].median() if pd.api.types.is_numeric_dtype(df[c])
                         else df[c].mode().iloc[0]
                     )
     return df
@@ -94,9 +103,11 @@ tabs = st.tabs([
 # --- 1. Datasets ---
 with tabs[0]:
     st.header("1. Datasets")
-    files = st.file_uploader("Upload files (CSV/Excel/Parquet/JSON)",
-                              type=['csv','xls','xlsx','parquet','json'],
-                              accept_multiple_files=True)
+    files = st.file_uploader(
+        "Upload files (CSV/Excel/Parquet/JSON)",
+        type=['csv','xls','xlsx','parquet','json'],
+        accept_multiple_files=True
+    )
     if files:
         for u in files:
             data = load_file(u)
@@ -109,7 +120,11 @@ with tabs[0]:
     if st.session_state.datasets:
         sel = st.selectbox("Select dataset", list(st.session_state.datasets.keys()), key='sel_dataset')
         st.session_state.current = sel
-        st.data_editor(st.session_state.datasets[sel], key=f"editor_{sel}", use_container_width=True)
+        st.data_editor(
+            st.session_state.datasets[sel],
+            key=f"editor_{sel}",
+            use_container_width=True
+        )
 
 # --- 2. Transform ---
 with tabs[1]:
@@ -119,7 +134,11 @@ with tabs[1]:
         df = st.session_state.datasets[key]
         for i, step in enumerate(st.session_state.steps):
             st.write(f"{i+1}. {step['type']} — {step.get('desc','')}")
-        op = st.selectbox("Operation", ['rename','filter','compute','drop_const','onehot','join','impute'], key='op')
+        op = st.selectbox(
+            "Operation",
+            ['rename','filter','compute','drop_const','onehot','join','impute'],
+            key='op'
+        )
         if op == 'rename':
             old = st.selectbox("Old column", df.columns)
             new = st.text_input("New column name")
@@ -156,7 +175,11 @@ with tabs[1]:
         if st.button("Apply Transformations"): 
             st.session_state.datasets[key] = apply_steps(df)
             st.success("Transformations applied.")
-        st.data_editor(st.session_state.datasets[key], key=f"transformed_{key}", use_container_width=True)
+        st.data_editor(
+            st.session_state.datasets[key],
+            key=f"transformed_{key}",
+            use_container_width=True
+        )
 
 # --- 3. Profile ---
 with tabs[2]:
@@ -188,7 +211,7 @@ with tabs[4]:
     if key:
         df = st.session_state.datasets[key]
         fmt = st.selectbox("Format", ['CSV','JSON','Parquet','Excel','Snowflake'], key='fmt')
-        if st.button("Export"):
+        if st.button("Export"):  
             if fmt == 'CSV':
                 st.download_button("Download CSV", df.to_csv(index=False).encode(), "data.csv")
             elif fmt == 'JSON':
@@ -200,12 +223,12 @@ with tabs[4]:
                 df.to_excel(out, index=False, engine='openpyxl')
                 st.download_button("Download Excel", out.getvalue(), "data.xlsx")
             else:
-                tbl = st.text_input("Snowflake table name", key='exp_tbl')
-                if st.button("Write to Snowflake"): 
-                    conn = get_sf_conn()
-                    write_pandas(conn, df, tbl)
-                    conn.close()
-                    st.success(f"Written to {tbl}")
+                # auto-create table in Snowflake
+                table_name = st.session_state.current.replace(':', '_')
+                conn = get_sf_conn()
+                write_pandas(conn, df, table_name)
+                conn.close()
+                st.success(f"Table '{table_name}' created and data loaded to Snowflake.")
 
 # --- 6. History ---
 with tabs[5]:
@@ -260,7 +283,7 @@ with tabs[8]:
             for n in G.nodes(): net.add_node(n, label=str(n), title=f"Degree: {G.degree(n)}", value=G.degree(n))
             for u, v, data in G.edges(data=True):
                 if (u, v) in top5 or (v, u) in top5:
-                    net.add_edge(u, v, value=data['weight'], width=4, color='red', title=f"Weight: {data['weight']}")
+                    net.add_edge(u, v, value=data['weight'], width=4, color='red', title=f"Weight: {data['weight']}\nCategory: {row.get('category','')}\nSubcategory: {row.get('subcategory','')}")
                 else:
                     net.add_edge(u, v, value=data['weight'], width=1, color='rgba(200,200,200,0.2)', title=f"Weight: {data['weight']}")
             net.show_buttons(filter_=['physics'])
