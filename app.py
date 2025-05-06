@@ -8,6 +8,7 @@ from pandasql import sqldf
 import snowflake.connector
 from snowflake.connector.pandas_tools import write_pandas
 import plotly.express as px
+import networkx as nx
 from datetime import datetime
 import yaml
 
@@ -80,10 +81,12 @@ def apply_steps(df):
         elif t == 'join' and step.get('aux'):
             aux_df = st.session_state.datasets.get(step['aux'])
             if aux_df is not None:
-                df = df.merge(aux_df,
-                              left_on=step['left'],
-                              right_on=step['right'],
-                              how=step['how'])
+                df = df.merge(
+                    aux_df,
+                    left_on=step['left'],
+                    right_on=step['right'],
+                    how=step['how']
+                )
         elif t == 'impute':
             for c in df.columns:
                 if df[c].isna().any():
@@ -102,15 +105,16 @@ tabs = st.tabs([
     "⬇️ Export",
     "🕒 History",
     "⚙️ Snowflake",
-    "📜 Pipeline"
+    "📜 Pipeline",
+    "🕸️ Social Graph"
 ])
 
 # Datasets Tab
 def datasets_tab():
     st.header("1. Upload & Manage Datasets")
-    files = st.file_uploader("Upload files", 
-                             type=['csv','xls','xlsx','parquet','json'], 
-                             accept_multiple_files=True)
+    files = st.file_uploader(
+        "Upload files", type=['csv','xls','xlsx','parquet','json'], accept_multiple_files=True
+    )
     if files:
         for u in files:
             df = load_file(u)
@@ -122,10 +126,19 @@ def datasets_tab():
                 st.session_state.datasets[u.name] = df
         st.success(f"Loaded {len(files)} files into {len(st.session_state.datasets)} datasets.")
     if st.session_state.datasets:
-        sel = st.selectbox("Select active dataset", list(st.session_state.datasets.keys()), key='sel_dataset')
+        sel = st.selectbox(
+            "Select active dataset",
+            list(st.session_state.datasets.keys()),
+            key='sel_dataset'
+        )
         st.session_state.current = sel
-        st.data_editor(st.session_state.datasets[sel], key=f"editor_{sel}", use_container_width=True)
+        st.data_editor(
+            st.session_state.datasets[sel],
+            key=f"editor_{sel}",
+            use_container_width=True
+        )
 
+# Transform Tab
 def transform_tab():
     st.header("2. Build Transformations")
     key = st.session_state.current
@@ -133,7 +146,6 @@ def transform_tab():
         st.info("Upload and select a dataset first.")
         return
     df = st.session_state.datasets[key]
-    # Show existing steps
     for i, s in enumerate(st.session_state.steps):
         st.write(f"{i+1}. {s['type']} — {s.get('desc','')}")
     st.markdown("---")
@@ -142,15 +154,13 @@ def transform_tab():
         ['rename','filter','compute','drop_const','onehot','join','impute'],
         key='op_transform'
     )
-    # Rename
     if op == 'rename':
-        old = st.selectbox("Old column", df.columns)
-        new = st.text_input("New column name")
+        old = st.selectbox("Old col", df.columns)
+        new = st.text_input("New col name")
         if st.button("Add Rename"):
             st.session_state.steps.append({
                 'type':'rename','old':old,'new':new,'desc':f"Rename {old}→{new}"}
             )
-    # Filter
     elif op == 'filter':
         st.write("Available columns:", list(df.columns))
         expr = st.text_input("Filter expression")
@@ -158,7 +168,6 @@ def transform_tab():
             st.session_state.steps.append({
                 'type':'filter','expr':expr,'desc':expr}
             )
-    # Compute
     elif op == 'compute':
         newc = st.text_input("New column", help="Name for the computed column.")
         st.write("**Available columns:**", list(df.columns))
@@ -168,18 +177,22 @@ def transform_tab():
             st.session_state.steps.append({
                 'type':'compute','new':newc,'expr':expr2,'desc':f"Compute {newc} = {expr2}"}
             )
-    # Drop Constants
     elif op == 'drop_const':
         if st.button("Add Drop Constants"):
             st.session_state.steps.append({'type':'drop_const','desc':'Drop constant columns'})
-    # One-Hot Encoding
     elif op == 'onehot':
-        cols = st.multiselect("Columns to encode", df.select_dtypes('object').columns)
+        cols = st.multiselect(
+            "Columns to encode", df.select_dtypes('object').columns
+        )
         if st.button("Add One-Hot"):
-            st.session_state.steps.append({'type':'onehot','cols':cols,'desc':f"One-hot {cols}"})
-    # Join
+            st.session_state.steps.append({
+                'type':'onehot','cols':cols,'desc':f"One-hot {cols}"}
+            )
     elif op == 'join':
-        aux = st.selectbox("Aux dataset", [k for k in st.session_state.datasets if k != key])
+        aux = st.selectbox(
+            "Aux dataset",
+            [k for k in st.session_state.datasets if k != key]
+        )
         left = st.selectbox("Left key", df.columns)
         right = st.selectbox("Right key", st.session_state.datasets[aux].columns)
         how = st.selectbox("Join type", ['inner','left','right','outer'])
@@ -187,23 +200,20 @@ def transform_tab():
             st.session_state.steps.append({
                 'type':'join','aux':aux,'left':left,'right':right,'how':how,'desc':f"Join {aux}"}
             )
-    # Impute
     elif op == 'impute':
         if st.button("Add Auto-Impute"):
             st.session_state.steps.append({'type':'impute','desc':'Auto-impute'})
-    # Apply transformations after selecting operation
     if st.button("Apply Transformations"):
         st.session_state.datasets[key] = apply_steps(df)
         st.success("Applied steps.")
-    # Show transformed data
     st.data_editor(
         st.session_state.datasets[key],
         key=f"transformed_{key}",
         use_container_width=True
     )
 
+# Profile Tab
 def profile_tab():
-():
     st.header("3. Data Profile")
     key = st.session_state.current
     if not key:
@@ -213,10 +223,11 @@ def profile_tab():
     stats = pd.DataFrame({
         'dtype': df.dtypes,
         'nulls': df.isna().sum(),
-        'null_pct': df.isna().mean()*100
+        'null_pct': df.isna().mean() * 100
     })
     st.dataframe(stats, use_container_width=True)
 
+# Insights Tab
 def insights_tab():
     st.header("4. Auto Insights")
     key = st.session_state.current
@@ -232,6 +243,7 @@ def insights_tab():
         fig2 = px.imshow(miss, title='Missingness Heatmap')
         st.plotly_chart(fig2, use_container_width=True)
 
+# Export Tab
 def export_tab():
     st.header("5. Export & Writeback")
     key = st.session_state.current
@@ -252,15 +264,16 @@ def export_tab():
             df.to_excel(out, index=False, engine='openpyxl')
             st.download_button("Download Excel", out.getvalue(), "data.xlsx")
         else:
-            with st.form("sf_wb"):
-                tbl = st.text_input("Table")
-                sub = st.form_submit_button("Writeback")
+            with st.form("sf_wb"): 
+                tbl = st.text_input("Snowflake table name")
+                sub = st.form_submit_button("Writeback to Snowflake")
             if sub:
                 conn = get_sf_conn()
                 write_pandas(conn, df, tbl)
                 conn.close()
-                st.success(f"Written to {tbl}")
+                st.success(f"Written back to {tbl}")
 
+# History Tab
 def history_tab():
     st.header("6. History")
     for idx, (ts, snap) in enumerate(st.session_state['versions']):
@@ -270,6 +283,7 @@ def history_tab():
             st.session_state.datasets[st.session_state.current] = snap
             st.experimental_rerun()
 
+# Snowflake Tab
 def snowflake_tab():
     st.header("7. Snowflake Settings")
     st.text_input("Account", key='sf_account')
@@ -279,14 +293,54 @@ def snowflake_tab():
     st.text_input("Database", key='sf_database')
     st.text_input("Schema", key='sf_schema')
 
+# Pipeline Tab
 def pipeline_tab():
     st.header("8. Pipeline Configuration as YAML")
     yaml_steps = yaml.dump({'pipeline_steps': st.session_state.steps}, sort_keys=False)
     st.text_area("Pipeline YAML", yaml_steps, height=300)
     st.download_button("Download YAML", yaml_steps, file_name="pipeline.yaml", mime="text/yaml")
 
+# Social Graph Tab
+def social_graph_tab():
+    st.header("9. Social Network Graph")
+    key = st.session_state.current
+    if not key:
+        st.info("Select a dataset containing edge list first.")
+        return
+    df = st.session_state.datasets[key]
+    cols = list(df.columns)
+    source = st.selectbox("Source node column", cols, key='src_col')
+    target = st.selectbox("Target node column", cols, key='tgt_col')
+    weight_opt = [None] + cols
+    weight = st.selectbox("Edge weight column (optional)", weight_opt, key='wt_col')
+    if st.button("Generate Graph"):
+        G = nx.DiGraph() if weight else nx.Graph()
+        if weight:
+            for _, row in df.iterrows():
+                G.add_edge(row[source], row[target], weight=row[weight])
+        else:
+            for _, row in df.iterrows():
+                G.add_edge(row[source], row[target])
+        pos = nx.spring_layout(G)
+        edge_x, edge_y = [], []
+        for e in G.edges():
+            x0, y0 = pos[e[0]]
+            x1, y1 = pos[e[1]]
+            edge_x += [x0, x1, None]
+            edge_y += [y0, y1, None]
+        edge_trace = px.line(x=edge_x, y=edge_y).update_traces(line=dict(width=1,color='#888'), hoverinfo='none')
+        node_x, node_y, node_text = [], [], []
+        for n in G.nodes():
+            x, y = pos[n]
+            node_x.append(x)
+            node_y.append(y)
+            node_text.append(str(n))
+        node_trace = px.scatter(x=node_x, y=node_y, text=node_text).update_traces(marker=dict(size=10, color=[len(list(G.adj[n])) for n in G.nodes()], showscale=True, colorbar=dict(title='Degree')), textposition='top center')
+        fig = go.Figure(data=edge_trace.data + node_trace.data, layout=go.Layout(showlegend=False, hovermode='closest', margin=dict(b=20,l=5,r=5,t=40)))
+        st.plotly_chart(fig, use_container_width=True)
+
 # Render Tabs
-dataset_funcs = [datasets_tab, transform_tab, profile_tab, insights_tab, export_tab, history_tab, snowflake_tab, pipeline_tab]
-for fn, tab in zip(dataset_funcs, tabs):
+funcs = [datasets_tab, transform_tab, profile_tab, insights_tab, export_tab, history_tab, snowflake_tab, pipeline_tab, social_graph_tab]
+for fn, tab in zip(funcs, tabs):
     with tab:
         fn()
