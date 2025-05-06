@@ -30,21 +30,7 @@ def get_sf_conn():
         warehouse=st.session_state.get('sf_warehouse', ''),
         database=st.session_state.get('sf_database', ''),
         schema=st.session_state.get('sf_schema', '')
-    ),
-        account=st.session_state.get('sf_account',''),
-        warehouse=st.session_state.get('sf_warehouse',''),
-        database=st.session_state.get('sf_database',''),
-        schema=st.session_state.get('sf_schema','')
-    ):
-    return snowflake.connector.connect(
-        user=st.session_state.get('sf_account',''),
-        password=st.session_state.get('sf_password',''),
-        account=st.session_state.get('sf_account',''),
-        warehouse=st.session_state.get('sf_warehouse',''),
-        database=st.session_state.get('sf_database',''),
-        schema=st.session_state.get('sf_schema','')
     )
-
 
 def load_file(uploader_file):
     ext = uploader_file.name.split('.')[-1].lower()
