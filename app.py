@@ -32,13 +32,34 @@ def get_sf_conn():
         schema=st.session_state.get('sf_schema','')
     )
 
+def parse_dates(df):
+    """Automatically parse columns containing 'date' into datetime objects."""
+    for col in df.columns:
+        if 'date' in col.lower():
+            try:
+                df[col] = pd.to_datetime(df[col], errors='coerce')
+            except Exception:
+                pass
+    return df
+
+
 def load_file(uploader_file):
     ext = uploader_file.name.split('.')[-1].lower()
     try:
-        if ext == 'csv': return pd.read_csv(uploader_file)
-        if ext in ['xls','xlsx']: return pd.read_excel(uploader_file, sheet_name=None)
-        if ext == 'parquet': return pd.read_parquet(uploader_file)
-        if ext == 'json': return pd.read_json(uploader_file)
+        if ext == 'csv':
+            df = pd.read_csv(uploader_file)
+            return parse_dates(df)
+        if ext in ['xls','xlsx']:
+            sheets = pd.read_excel(uploader_file, sheet_name=None)
+            for sheet, df in sheets.items():
+                sheets[sheet] = parse_dates(df)
+            return sheets
+        if ext == 'parquet':
+            df = pd.read_parquet(uploader_file)
+            return parse_dates(df)
+        if ext == 'json':
+            df = pd.read_json(uploader_file)
+            return parse_dates(df)
     except Exception as e:
         st.error(f"Failed to load {uploader_file.name}: {e}")
     return None
@@ -244,22 +265,37 @@ with tabs[8]:
         wt_opt = [None] + cols
         wt = st.selectbox("Weight column", wt_opt, key='wt')
         if st.button("Generate Graph"):
-            G=nx.Graph()
-            for _,r in df.iterrows():
-                u,v=r[src],r[tgt]
-                w=float(r[wt]) if wt and pd.notna(r[wt]) else 1
-                if G.has_edge(u,v): G[u][v]['weight']+=w
-                else: G.add_edge(u,v,weight=w)
-            edges=sorted(G.edges(data=True),key=lambda x:x[2]['weight'],reverse=True)
-            top5={(u,v) for u,v,_ in edges[:5]}
-            net=Network(height='700px',width='100%',bgcolor='#222222',font_color='white')
-            net.barnes_hut(gravity=-20000,central_gravity=0.3,spring_length=100,spring_strength=0.001)
-            for n in G.nodes(): net.add_node(n,label=str(n),title=f'Degree:{G.degree(n)}',value=G.degree(n))
-            for u,v,d in G.edges(data=True):
-                if (u,v) in top5 or (v,u) in top5:
-                    net.add_edge(u,v,value=d['weight'],width=4,color='red',title=f"Weight:{d['weight']}")
+            # Build graph
+            G = nx.Graph()
+            for _, r in df.iterrows():
+                u, v = r[src], r[tgt]
+                w = float(r[wt]) if wt and pd.notna(r[wt]) else 1
+                if G.has_edge(u, v):
+                    G[u][v]['weight'] += w
                 else:
-                    net.add_edge(u,v,value=d['weight'],width=1,color='rgba(200,200,200,0.2)',title=f"Weight:{d['weight']}")
+                    G.add_edge(u, v, weight=w)
+            # Identify top-5 edges by weight
+            edges = sorted(G.edges(data=True), key=lambda x: x[2]['weight'], reverse=True)
+            top5_edges = {(u, v) for u, v, _ in edges[:5]}
+            # Identify top-5 nodes by degree
+            degree_list = sorted(G.degree(), key=lambda x: x[1], reverse=True)
+            top5_nodes = {n for n, d in degree_list[:5]}
+            # Create network
+            net = Network(height='700px', width='100%', bgcolor='#222222', font_color='white')
+            net.barnes_hut(gravity=-20000, central_gravity=0.3, spring_length=100, spring_strength=0.001)
+            # Add nodes with highlighting for top degrees
+            for n in G.nodes():
+                deg = G.degree(n)
+                if n in top5_nodes:
+                    net.add_node(n, label=str(n), title=f"Degree: {deg}", value=deg*2, color='orange')
+                else:
+                    net.add_node(n, label=str(n), title=f"Degree: {deg}", value=deg)
+            # Add edges with highlighting
+            for u, v, d in G.edges(data=True):
+                if (u, v) in top5_edges or (v, u) in top5_edges:
+                    net.add_edge(u, v, value=d['weight'], width=4, color='red', title=f"Weight: {d['weight']}")
+                else:
+                    net.add_edge(u, v, value=d['weight'], width=1, color='rgba(200,200,200,0.2)', title=f"Weight: {d['weight']}")
             net.show_buttons(filter_=['physics'])
             html = net.generate_html()
-            import streamlit.components.v1 as comp; comp.html(html,height=750,scrolling=True)
+            import streamlit.components.v1 as comp; comp.html(html, height=750, scrolling=True)
