@@ -11,3 +11,4 @@ plotly
 pyyaml
 networkx
 scipy
+pyvis
