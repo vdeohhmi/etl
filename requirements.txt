@@ -1,14 +1,12 @@
 streamlit
 pandas
 numpy
+pandasql
 pyarrow
 openpyxl
 xlrd
 sqlalchemy
-pandasql
 snowflake-connector-python
-plotly
 pyyaml
 networkx
-scipy
 pyvis
