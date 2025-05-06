@@ -52,7 +52,12 @@ def apply_steps(df):
         if op == 'rename':
             df = df.rename(columns=step['mapping'])
         elif op == 'filter':
-            df = df.query(step['expression'])
+            expr = step.get('expression', '').strip()
+            if expr:
+                try:
+                    df = df.query(expr)
+                except Exception as e:
+                    st.warning(f"Skipping invalid filter '{expr}': {e}")
         elif op == 'compute':
             df[step['new_column']] = df.eval(step['expression'])
         elif op == 'drop':
