@@ -1,7 +1,8 @@
 streamlit
 pandas
-xlsxwriter
+xlrd
 openpyxl
+xlsxwriter
 pyarrow
 sqlalchemy
 jsonschema
