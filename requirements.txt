@@ -8,3 +8,4 @@ sqlalchemy
 pandasql
 snowflake-connector-python
 plotly
+pyyaml
