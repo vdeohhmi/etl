@@ -155,7 +155,7 @@ with tabs[1]:
         if op=='impute':
             if st.button("Add Auto Impute"): st.session_state.steps.append({'type':'impute','desc':'auto impute'})
         if st.button("Apply All Steps"): st.session_state.df = apply_steps(df)
-        st.experimental_data_editor(st.session_state.df, key='transformed')
+        st.data_editor(st.session_state.df, key='transformed')
 
 # Profile tab
 with tabs[2]:
