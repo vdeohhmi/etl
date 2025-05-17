@@ -9,7 +9,7 @@ from snowflake.connector.pandas_tools import write_pandas
 import networkx as nx
 from pyvis.network import Network
 import plotly.express as px
-import openai
+from openai import OpenAI
 import json
 
 # --- App Configuration ---
@@ -17,15 +17,13 @@ st.set_page_config(page_title="Data Wizard X", layout="wide")
 st.title("🔮 Data Wizard X — Smart ETL and Analysis Studio")
 
 # --- Session State Initialization ---
-for key, default in [
-    ('datasets', {}), ('current', None),
-    ('steps', []), ('versions', [])
-]:
+for key, default in [('datasets', {}), ('current', None), ('steps', []), ('versions', [])]:
     if key not in st.session_state:
         st.session_state[key] = default
 
 # --- OpenAI API Key (Directly in Code) ---
-openai.api_key = "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"
+os.environ["OPENAI_API_KEY"] = "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"
+client = OpenAI()  # v1 client
 
 # --- Helper Functions ---
 def get_sf_conn():
@@ -164,10 +162,7 @@ with tabs[1]:
 
         elif op == 'compute':
             newc = st.text_input("New column name", key='compute_new')
-            desc = st.text_area(
-                "Describe logic in plain English",
-                key='compute_desc'
-            )
+            desc = st.text_area("Describe logic in plain English", key='compute_desc')
             if st.button("AI Generate & Add Compute", key='btn_compute'):
                 cols = df.columns.tolist()
                 sample = df.head(3).to_dict(orient='records')
@@ -177,7 +172,7 @@ with tabs[1]:
                     f"for new column '{newc}' with logic: {desc}. Return only the expression."
                 )
                 with st.spinner("Generating expression..."):
-                    resp = openai.ChatCompletion.create(
+                    resp = client.chat.completions.create(
                         model="gpt-4o-mini",
                         messages=[{"role":"user","content":prompt}]
                     )
@@ -210,9 +205,7 @@ with tabs[1]:
                 [k for k in st.session_state.datasets if k != key],
                 key='join_aux'
             )
-            left = st.selectbox(
-                "Left key", df.columns, key='join_left'
-            )
+            left = st.selectbox("Left key", df.columns, key='join_left')
             right = st.selectbox(
                 "Right key",
                 st.session_state.datasets[aux].columns,
@@ -266,10 +259,8 @@ with tabs[3]:
         df = st.session_state.datasets[key]
         num = df.select_dtypes('number')
         if not num.empty:
-            st.plotly_chart(
-                px.imshow(num.corr(), text_auto=True),
-                use_container_width=True
-            )
+            st.plotly_chart(px.imshow(num.corr(), text_auto=True),
+                            use_container_width=True)
 
 # --- 5. Export ---
 with tabs[4]:
@@ -373,7 +364,7 @@ with tabs[7]:
                     "Return only the expression."
                 )
                 with st.spinner("Generating..."):
-                    resp = openai.ChatCompletion.create(
+                    resp = client.chat.completions.create(
                         model="gpt-4o-mini",
                         messages=[{"role":"user","content":prompt}]
                     )
@@ -394,7 +385,7 @@ with tabs[7]:
                     f"Question: {query}. Provide a concise markdown answer with examples or code."
                 )
                 with st.spinner("Querying..."):
-                    resp = openai.ChatCompletion.create(
+                    resp = client.chat.completions.create(
                         model="gpt-4o-mini",
                         messages=[{"role":"user","content":prompt}]
                     )
@@ -417,7 +408,7 @@ with tabs[7]:
                         f"Analyze column '{col}': discuss distribution, missing data, outliers, implications. Provide markdown."
                     )
                     with st.spinner("Writing story..."):
-                        resp = openai.ChatCompletion.create(
+                        resp = client.chat.completions.create(
                             model="gpt-4o-mini",
                             messages=[{"role":"user","content":prompt}]
                         )
@@ -431,7 +422,7 @@ with tabs[7]:
                         "Write a detailed report summarizing key insights: distributions, correlations, missing data, business use cases. Markdown."
                     )
                     with st.spinner("Writing report..."):
-                        resp = openai.ChatCompletion.create(
+                        resp = client.chat.completions.create(
                             model="gpt-4o-mini",
                             messages=[{"role":"user","content":prompt}]
                         )
