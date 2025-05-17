@@ -12,3 +12,4 @@ networkx
 pyvis
 plotly
 tableauserverclient
+openai
