@@ -63,10 +63,8 @@ def apply_steps(df):
         if t == 'rename':
             df = df.rename(columns={step['old']: step['new']})
         elif t == 'filter' and step.get('expr'):
-            try:
-                df = df.query(step['expr'])
-            except:
-                pass
+            try: df = df.query(step['expr'])
+            except: pass
         elif t == 'compute' and step.get('expr'):
             try:
                 df[step['new']] = df.eval(step['expr'])
@@ -271,10 +269,8 @@ with tabs[3]:
         df = st.session_state.datasets[key]
         num = df.select_dtypes('number')
         if not num.empty:
-            st.plotly_chart(
-                px.imshow(num.corr(), text_auto=True),
-                use_container_width=True
-            )
+            st.plotly_chart(px.imshow(num.corr(), text_auto=True),
+                            use_container_width=True)
 
 # --- 5. Export ---
 with tabs[4]:
@@ -355,16 +351,22 @@ with tabs[7]:
     if not key:
         st.info("Select a dataset to access AI tools.")
     else:
+        # 1) show live preview
         df = st.session_state.datasets[key]
+        st.subheader("Data Preview")
+        st.data_editor(df, key="ai_tool_preview", use_container_width=True)
+
+        # 2) pick tool
         tool = st.selectbox("Choose AI Tool:", [
             "Compute Column", "Natural Language Query", "Data Storytelling"
         ], key='ai_tool')
 
-        # ----------------------- CHANGED: Compute Column now applies & previews immediately -----------------------
+        # 3a) Compute Column
         if tool == "Compute Column":
             newc = st.text_input("New column name", key='ai_newc')
             desc = st.text_area("Describe logic in plain English", key='ai_desc')
-            if st.button("Generate Formula & Apply", key='ai_gen'):
+
+            if st.button("Generate & Apply", key='ai_gen'):
                 cols = df.columns.tolist()
                 sample = df.head(3).to_dict(orient='records')
                 prompt = (
@@ -372,26 +374,28 @@ with tabs[7]:
                     f"Generate a pandas eval expression for new column '{newc}' with logic: {desc}. "
                     "Return only the expression."
                 )
-                with st.spinner("Generating..."):
+                with st.spinner("Generating…"):
                     resp = client.chat.completions.create(
                         model="gpt-4o-mini",
                         messages=[{"role":"user","content":prompt}]
                     )
                 expr = resp.choices[0].message.content.strip().strip('"')
 
-                # register the new compute step
+                # register the compute step
                 st.session_state.steps.append({
-                    'type':'compute','new':newc,'expr':expr,'desc':desc
+                    'type':'compute',
+                    'new':newc,
+                    'expr':expr,
+                    'desc':desc
                 })
-                # apply all steps (including this one) and overwrite the dataset
+                # apply and update
                 df_new = apply_steps(df)
                 st.session_state.datasets[key] = df_new
 
-                st.success(f"Computed '{newc}' with `{expr}` and applied.")
-                # show live preview
-                st.data_editor(df_new, use_container_width=True)
+                st.success(f"Added '{newc}' = `{expr}`")
+                st.experimental_rerun()
 
-        # Natural Language Query remains unchanged
+        # 3b) Natural Language Query
         elif tool == "Natural Language Query":
             query = st.text_area("Ask a question about your data", key='ai_query')
             if st.button("Run Query", key='ai_query_btn'):
@@ -401,14 +405,14 @@ with tabs[7]:
                     f"You are a data analyst. Columns: {cols}. Sample: {sample}. "
                     f"Question: {query}. Provide a concise markdown answer with examples or code."
                 )
-                with st.spinner("Querying..."):
+                with st.spinner("Querying…"):
                     resp = client.chat.completions.create(
                         model="gpt-4o-mini",
                         messages=[{"role":"user","content":prompt}]
                     )
                 st.markdown(resp.choices[0].message.content)
 
-        # Data Storytelling remains unchanged
+        # 3c) Data Storytelling
         else:
             summary_type = st.selectbox("Story for:", [
                 "Entire Dataset", "Single Column"
@@ -423,7 +427,7 @@ with tabs[7]:
                         f"Analyze column '{col}': discuss distribution, missing data, "
                         "outliers, implications. Provide markdown."
                     )
-                    with st.spinner("Writing story..."):
+                    with st.spinner("Writing story…"):
                         resp = client.chat.completions.create(
                             model="gpt-4o-mini",
                             messages=[{"role":"user","content":prompt}]
@@ -438,7 +442,7 @@ with tabs[7]:
                         "Write a detailed report summarizing key insights: distributions, "
                         "correlations, missing data, business use cases. Markdown."
                     )
-                    with st.spinner("Writing report..."):
+                    with st.spinner("Writing report…"):
                         resp = client.chat.completions.create(
                             model="gpt-4o-mini",
                             messages=[{"role":"user","content":prompt}]
