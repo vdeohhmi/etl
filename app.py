@@ -25,8 +25,7 @@ for key, default in [('datasets', {}), ('current', None), ('steps', []), ('versi
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     st.warning(
-        "OpenAI API key not found—please set the OPENAI_API_KEY environment variable "
-        "(e.g. `export OPENAI_API_KEY=sk-…` before running`)."
+        "OpenAI API key not found—please set the OPENAI_API_KEY environment variable."
     )
 client = OpenAI(api_key=api_key)
 
@@ -361,10 +360,11 @@ with tabs[7]:
             "Compute Column", "Natural Language Query", "Data Storytelling"
         ], key='ai_tool')
 
+        # ----------------------- CHANGED: Compute Column now applies & previews immediately -----------------------
         if tool == "Compute Column":
             newc = st.text_input("New column name", key='ai_newc')
             desc = st.text_area("Describe logic in plain English", key='ai_desc')
-            if st.button("Generate Formula", key='ai_gen'):
+            if st.button("Generate Formula & Apply", key='ai_gen'):
                 cols = df.columns.tolist()
                 sample = df.head(3).to_dict(orient='records')
                 prompt = (
@@ -378,11 +378,20 @@ with tabs[7]:
                         messages=[{"role":"user","content":prompt}]
                     )
                 expr = resp.choices[0].message.content.strip().strip('"')
-                st.code(f"df['{newc}'] = df.eval('{expr}')")
+
+                # register the new compute step
                 st.session_state.steps.append({
                     'type':'compute','new':newc,'expr':expr,'desc':desc
                 })
+                # apply all steps (including this one) and overwrite the dataset
+                df_new = apply_steps(df)
+                st.session_state.datasets[key] = df_new
 
+                st.success(f"Computed '{newc}' with `{expr}` and applied.")
+                # show live preview
+                st.data_editor(df_new, use_container_width=True)
+
+        # Natural Language Query remains unchanged
         elif tool == "Natural Language Query":
             query = st.text_area("Ask a question about your data", key='ai_query')
             if st.button("Run Query", key='ai_query_btn'):
@@ -399,7 +408,8 @@ with tabs[7]:
                     )
                 st.markdown(resp.choices[0].message.content)
 
-        else:  # Data Storytelling
+        # Data Storytelling remains unchanged
+        else:
             summary_type = st.selectbox("Story for:", [
                 "Entire Dataset", "Single Column"
             ], key='ai_story_type')
