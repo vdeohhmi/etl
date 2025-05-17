@@ -17,7 +17,10 @@ st.set_page_config(page_title="Data Wizard X", layout="wide")
 st.title("🔮 Data Wizard X — Smart ETL and Analysis Studio")
 
 # --- Session State Initialization ---
-for key, default in [('datasets', {}), ('current', None), ('steps', []), ('versions', [])]:
+for key, default in [
+    ('datasets', {}), ('current', None),
+    ('steps', []), ('versions', [])
+]:
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -98,15 +101,8 @@ def apply_steps(df):
 
 # --- UI Tabs ---
 tabs = st.tabs([
-    "📂 Datasets",
-    "✏️ Transform",
-    "📈 Profile",
-    "💡 Insights",
-    "⬇️ Export",
-    "🕒 History",
-    "⚙️ Snowflake",
-    "🤖 AI Toolkit",
-    "🕸️ Social Graph"
+    "📂 Datasets", "✏️ Transform", "📈 Profile", "💡 Insights",
+    "⬇️ Export", "🕒 History", "⚙️ Snowflake", "🤖 AI Toolkit", "🕸️ Social Graph"
 ])
 
 # --- 1. Datasets ---
@@ -332,7 +328,6 @@ with tabs[5]:
             cols[0].write(f"{idx+1}. {ts}")
             if cols[1].button("Revert", key=f"hist_{idx}"):
                 st.session_state.datasets[key] = snap
-                st.experimental_rerun()
 
 # --- 7. Snowflake Settings ---
 with tabs[6]:
@@ -351,12 +346,14 @@ with tabs[7]:
     if not key:
         st.info("Select a dataset to access AI tools.")
     else:
-        # 1) show live preview
+        # Always read from session state
         df = st.session_state.datasets[key]
-        st.subheader("Data Preview")
-        st.data_editor(df, key="ai_tool_preview", use_container_width=True)
 
-        # 2) pick tool
+        # 1) Preview of current data
+        st.subheader("Data Preview")
+        st.data_editor(df, key="ai_preview", use_container_width=True)
+
+        # 2) Choose tool
         tool = st.selectbox("Choose AI Tool:", [
             "Compute Column", "Natural Language Query", "Data Storytelling"
         ], key='ai_tool')
@@ -381,19 +378,18 @@ with tabs[7]:
                     )
                 expr = resp.choices[0].message.content.strip().strip('"')
 
-                # register the compute step
+                # register step and apply
                 st.session_state.steps.append({
-                    'type':'compute',
-                    'new':newc,
-                    'expr':expr,
-                    'desc':desc
+                    'type':'compute','new':newc,'expr':expr,'desc':desc
                 })
-                # apply and update
-                df_new = apply_steps(df)
-                st.session_state.datasets[key] = df_new
+                updated = apply_steps(df)
+                st.session_state.datasets[key] = updated
 
-                st.success(f"Added '{newc}' = `{expr}`")
-                st.experimental_rerun()
+                st.success(f"Added column '{newc}' = `{expr}`")
+
+                # immediate preview of updated data
+                st.subheader("Updated Preview")
+                st.data_editor(updated, use_container_width=True)
 
         # 3b) Natural Language Query
         elif tool == "Natural Language Query":
@@ -475,10 +471,8 @@ with tabs[8]:
             )
             top5 = {(u, v) for u, v, d in edges_sorted[:5]}
             net = Network(
-                height="700px",
-                width="100%",
-                bgcolor="#222222",
-                font_color="white"
+                height="700px", width="100%",
+                bgcolor="#222222", font_color="white"
             )
             net.show_buttons(filter_=['physics'])
             for n in G.nodes():
