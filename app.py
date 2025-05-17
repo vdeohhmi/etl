@@ -1,3 +1,4 @@
+```python
 import os
 import streamlit as st
 import pandas as pd
@@ -16,8 +17,10 @@ st.title("🔮 Data Wizard X — Smart ETL and Analysis Studio")
 
 # --- Session State Initialization ---
 for key, default in [
-    ("datasets", {}), ("current", None),
-    ("steps", []), ("versions", [])
+    ("datasets", {}),
+    ("current", None),
+    ("steps", []),
+    ("versions", [])
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -27,6 +30,21 @@ api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     st.warning("Set the OPENAI_API_KEY environment variable before running.")
 client = OpenAI(api_key=api_key)
+
+# --- Helper to clean AI expressions ---
+def clean_expr(raw: str) -> str:
+    """
+    Remove wrapping ``` fences and any stray backticks from an AI-returned expression.
+    """
+    lines = raw.strip().splitlines()
+    # Drop first/last line if they are ``` fences
+    if lines and lines[0].lstrip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].lstrip().startswith("```"):
+        lines = lines[:-1]
+    expr = "\n".join(lines)
+    # Remove any remaining backticks
+    return expr.replace("`", "").strip()
 
 # --- Helper Functions ---
 def load_file(f):
@@ -44,48 +62,59 @@ def load_file(f):
         st.error(f"Failed to load {f.name}: {e}")
     return None
 
-def apply_steps(df):
+
+def apply_steps(df: pd.DataFrame) -> pd.DataFrame:
+    # Save snapshot
     st.session_state.versions.append(df.copy())
+    # Apply each step
     for s in st.session_state.steps:
-        t = s["type"]
+        t = s.get("type")
         if t == "rename":
             df = df.rename(columns={s["old"]: s["new"]})
         elif t == "filter" and s.get("expr"):
             try:
                 df = df.query(s["expr"])
-            except:
+            except Exception:
                 pass
         elif t == "compute" and s.get("expr"):
+            expr = s["expr"]
             try:
-                df[s["new"]] = df.eval(s["expr"])
-            except:
-                df[s["new"]] = df.eval(s["expr"], engine="python")
+                df[s["new"]] = df.eval(expr)
+            except Exception:
+                df[s["new"]] = df.eval(expr, engine="python")
         elif t == "drop_const":
             df = df.loc[:, df.nunique() > 1]
         elif t == "onehot":
-            df = pd.get_dummies(df, columns=s["cols"])
+            df = pd.get_dummies(df, columns=s.get("cols", []))
         elif t == "join":
-            aux = st.session_state.datasets[s["aux"]]
-            df = df.merge(
-                aux,
-                left_on=s["left"],
-                right_on=s["right"],
-                how=s["how"]
-            )
+            aux = st.session_state.datasets.get(s["aux"])
+            if aux is not None:
+                df = df.merge(
+                    aux,
+                    left_on=s["left"],
+                    right_on=s["right"],
+                    how=s.get("how", "inner")
+                )
         elif t == "impute":
             for c in df.columns:
                 if df[c].isna().any():
-                    df[c] = (
-                        df[c].median()
-                        if pd.api.types.is_numeric_dtype(df[c])
+                    df[c] = df[c].fillna(
+                        df[c].median() if pd.api.types.is_numeric_dtype(df[c])
                         else df[c].mode().iloc[0]
                     )
     return df
 
 # --- UI Tabs ---
 tabs = st.tabs([
-    "📂 Datasets","✏️ Transform","📈 Profile","💡 Insights",
-    "⬇️ Export","🕒 History","⚙️ Snowflake","🤖 AI Toolkit","🕸️ Social Graph"
+    "📂 Datasets",
+    "✏️ Transform",
+    "📈 Profile",
+    "💡 Insights",
+    "⬇️ Export",
+    "🕒 History",
+    "⚙️ Snowflake",
+    "🤖 AI Toolkit",
+    "🕸️ Social Graph"
 ])
 
 # --- 1. Datasets ---
@@ -98,22 +127,22 @@ with tabs[0]:
     )
     if uploads:
         for f in uploads:
-            df = load_file(f)
-            if isinstance(df, dict):
-                for sheet, sdf in df.items():
+            data = load_file(f)
+            if isinstance(data, dict):
+                for sheet, sdf in data.items():
                     st.session_state.datasets[f"{f.name}:{sheet}"] = sdf
-            elif df is not None:
-                st.session_state.datasets[f.name] = df
+            elif data is not None:
+                st.session_state.datasets[f.name] = data
         st.success("Datasets loaded.")
     if st.session_state.datasets:
-        sel = st.selectbox(
+        key = st.selectbox(
             "Select dataset",
             list(st.session_state.datasets.keys())
         )
-        st.session_state.current = sel
+        st.session_state.current = key
         st.data_editor(
-            st.session_state.datasets[sel],
-            key=f"editor_{sel}",
+            st.session_state.datasets[key],
+            key=f"editor_{key}",
             use_container_width=True
         )
 
@@ -122,36 +151,33 @@ with tabs[1]:
     st.header("2. Transform")
     key = st.session_state.current
     if key:
-        df = st.session_state.datasets[key]
+        df = st.session_state.datasets.get(key)
         st.write("**Current Steps:**")
-        for i, s in enumerate(st.session_state.steps, 1):
-            st.write(f"{i}. {s['type']} — {s.get('desc','')}")
+        for i, step in enumerate(st.session_state.steps, 1):
+            st.write(f"{i}. {step['type']} — {step.get('desc','')}")
         op = st.selectbox("Operation", [
             "rename","filter","compute","drop_const",
             "onehot","join","impute"
         ])
-        with st.form("transform_form", clear_on_submit=False):
+        with st.form("transform_form"):
             if op == "rename":
                 old = st.selectbox("Old column", df.columns)
                 new = st.text_input("New column name")
-                submitted = st.form_submit_button("Add Rename")
-                if submitted:
+                if st.form_submit_button("Add Rename"):
                     st.session_state.steps.append({
                         "type":"rename","old":old,"new":new,
-                        "desc":f"{old}→{new}"
+                        "desc":f"Rename {old}→{new}"
                     })
             elif op == "filter":
-                expr = st.text_input("Filter expression")
-                submitted = st.form_submit_button("Add Filter")
-                if submitted:
+                expr = st.text_input("Filter expression (pandas query)")
+                if st.form_submit_button("Add Filter"):
                     st.session_state.steps.append({
                         "type":"filter","expr":expr,"desc":expr
                     })
             elif op == "compute":
                 newc = st.text_input("New column name")
                 desc = st.text_area("Describe logic in plain English")
-                submitted = st.form_submit_button("AI Generate & Add Compute")
-                if submitted:
+                if st.form_submit_button("AI Generate & Add Compute"):
                     cols = df.columns.tolist()
                     sample = df.head(3).to_dict("records")
                     prompt = (
@@ -164,14 +190,14 @@ with tabs[1]:
                             model="gpt-4o-mini",
                             messages=[{"role":"user","content":prompt}]
                         )
-                    expr = resp.choices[0].message.content.strip().strip('"')
+                    raw = resp.choices[0].message.content
+                    expr = clean_expr(raw)
                     st.code(expr)
                     st.session_state.steps.append({
                         "type":"compute","new":newc,"expr":expr,"desc":desc
                     })
             elif op == "drop_const":
-                submitted = st.form_submit_button("Add Drop Constants")
-                if submitted:
+                if st.form_submit_button("Add Drop Constants"):
                     st.session_state.steps.append({
                         "type":"drop_const","desc":"drop constant cols"
                     })
@@ -180,10 +206,10 @@ with tabs[1]:
                     "Columns to encode",
                     df.select_dtypes("object").columns
                 )
-                submitted = st.form_submit_button("Add One-Hot")
-                if submitted:
+                if st.form_submit_button("Add One-Hot"):
                     st.session_state.steps.append({
-                        "type":"onehot","cols":cols,"desc":",".join(cols)
+                        "type":"onehot","cols":cols,
+                        "desc":",".join(cols)
                     })
             elif op == "join":
                 aux = st.selectbox(
@@ -196,25 +222,23 @@ with tabs[1]:
                     st.session_state.datasets[aux].columns
                 )
                 how = st.selectbox("Join type", ["inner","left","right","outer"])
-                submitted = st.form_submit_button("Add Join")
-                if submitted:
+                if st.form_submit_button("Add Join"):
                     st.session_state.steps.append({
                         "type":"join","aux":aux,
                         "left":left,"right":right,"how":how,
-                        "desc":f"{aux} on {left}={right}"
+                        "desc":f"Join {aux} on {left}={right}"
                     })
             else:  # impute
-                submitted = st.form_submit_button("Add Impute")
-                if submitted:
+                if st.form_submit_button("Add Impute"):
                     st.session_state.steps.append({
                         "type":"impute","desc":"auto-impute"
                     })
-        # apply and preview
-        out = apply_steps(df)
-        st.session_state.datasets[key] = out
+        # apply transformations and preview
+        updated = apply_steps(df)
+        st.session_state.datasets[key] = updated
         st.write("**Transformed Preview:**")
         st.data_editor(
-            out,
+            updated,
             key=f"transform_preview_{key}_{len(st.session_state.versions)}",
             use_container_width=True
         )
@@ -303,7 +327,7 @@ with tabs[5]:
     key = st.session_state.current
     if key and st.session_state.versions:
         for i, snap in enumerate(st.session_state.versions, 1):
-            c1, c2 = st.columns([0.7,0.3])
+            c1, c2 = st.columns([0.7, 0.3])
             c1.write(f"{i}. Saved snapshot")
             if c2.button("Revert", key=f"history_revert_{key}_{i}"):
                 st.session_state.datasets[key] = snap
@@ -348,7 +372,7 @@ with tabs[7]:
             newc = st.text_input("New column name", key="ai_newc")
             desc = st.text_area("Describe logic in plain English", key="ai_desc")
 
-            with st.form("ai_compute_form", clear_on_submit=False):
+            with st.form("ai_compute_form"):
                 apply_ai = st.form_submit_button("Generate & Apply")
                 if apply_ai:
                     cols = df.columns.tolist()
@@ -363,7 +387,8 @@ with tabs[7]:
                             model="gpt-4o-mini",
                             messages=[{"role":"user","content":prompt}]
                         )
-                    expr = resp.choices[0].message.content.strip().strip('"')
+                    raw = resp.choices[0].message.content
+                    expr = clean_expr(raw)
                     st.code(expr)
                     st.session_state.steps.append({
                         "type":"compute","new":newc,"expr":expr,"desc":desc
@@ -372,7 +397,7 @@ with tabs[7]:
             alt = st.text_input(
                 "Or paste your own formula:",
                 key="ai_alt_formula",
-                help="e.g. (df['Ship Date']-df['Order Date']).dt.days"
+                help="e.g. (df['A']+df['B'])/2"
             )
             if st.button("Apply Alternate Formula"):
                 formula = st.session_state.get("ai_alt_formula","").strip()
@@ -399,7 +424,7 @@ with tabs[7]:
                     f"You are a data analyst. Columns: {cols}. Sample: {sample}. "
                     f"Question: {q}. Provide a concise markdown answer with examples or code."
                 )
-                with st.spinner("AI…"):
+                with st.spinner("Calling AI…"):
                     resp = client.chat.completions.create(
                         model="gpt-4o-mini",
                         messages=[{"role":"user","content":prompt}]
@@ -409,24 +434,26 @@ with tabs[7]:
         else:  # Data Storytelling
             choice = st.selectbox(
                 "Story for:",
-                ["Entire Dataset","Single Column"]
+                ["Entire Dataset","```python
+Single Column
+```"]
             )
-            if choice == "Single Column":
+            if choice.startswith("```python"):  # Single Column
                 col = st.selectbox("Column", df.columns, key="ai_story_col")
                 if st.button("Generate Story"):
                     cols = df.columns.tolist()
                     sample = df.head(5).to_dict("records")
                     prompt = (
                         f"You are a data journalist. Columns: {cols}. Sample: {sample}. "
-                        f"Analyze column '{col}': distribution, missing data, outliers."
+                        f"Analyze column '{col}': distribution, missing data, outliers.""
                     )
-                    with st.spinner("AI…"):
+                    with st.spinner("Calling AI…"):
                         resp = client.chat.completions.create(
                             model="gpt-4o-mini",
                             messages=[{"role":"user","content":prompt}]
                         )
                     st.markdown(resp.choices[0].message.content)
-            else:
+            else:  # Entire Dataset
                 if st.button("Generate Dataset Story"):
                     cols = df.columns.tolist()
                     sample = df.head(5).to_dict("records")
@@ -434,7 +461,7 @@ with tabs[7]:
                         f"You are a data journalist. Columns: {cols}. Sample: {sample}. "
                         "Write a detailed report summarizing distributions, correlations, missing data, and use cases."
                     )
-                    with st.spinner("AI…"):
+                    with st.spinner("Calling AI…"):
                         resp = client.chat.completions.create(
                             model="gpt-4o-mini",
                             messages=[{"role":"user","content":prompt}]
@@ -470,11 +497,10 @@ with tabs[8]:
                 height="700px", width="100%",
                 bgcolor="#222222", font_color="white"
             )
-            net.show_buttons(filter_=["physics"])
+            net.show_buttons(filter_["physics"])
             for n in G.nodes():
                 net.add_node(
-                    n,
-                    label=str(n),
+                    n, label=str(n),
                     title=f"Degree: {G.degree(n)}",
                     value=G.degree(n)
                 )
@@ -489,3 +515,4 @@ with tabs[8]:
             html = net.generate_html()
             import streamlit.components.v1 as components
             components.html(html, height=750, scrolling=True)
+```
