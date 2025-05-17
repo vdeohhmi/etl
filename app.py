@@ -21,9 +21,8 @@ for key, default in [('datasets', {}), ('current', None), ('steps', []), ('versi
     if key not in st.session_state:
         st.session_state[key] = default
 
-# --- Load OpenAI Key ---
-if 'openai' in st.secrets:
-    openai.api_key = st.secrets['openai'].get('api_key', '')
+# --- OpenAI API Key (Directly in Code) ---
+openai.api_key = "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"
 
 # --- Helper Functions ---
 def get_sf_conn():
@@ -126,20 +125,16 @@ with tabs[1]:
         elif op == 'compute':
             newc = st.text_input("New column name"); desc = st.text_area("Describe logic in plain English")
             if st.button("AI Generate & Add Compute"):
-                if not openai.api_key:
-                    st.error("OpenAI key not set in .streamlit/secrets.toml")
-                else:
-                    cols = df.columns.tolist(); sample = df.head(3).to_dict(orient='records')
-                    prompt = (
-                        f"You are a Python data engineer. DataFrame columns: {cols}. Sample rows: {sample}. "
-                        f"Generate a pandas eval expression for new column '{newc}' with logic: {desc}. "
-                        "Return only the expression string."
-                    )
-                    with st.spinner("Generating expression..."):
-                        resp = openai.ChatCompletion.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}])
-                    expr = resp.choices[0].message.content.strip().strip('"')
-                    st.code(f"df['{newc}'] = df.eval('{expr}')")
-                    st.session_state.steps.append({'type':'compute','new':newc,'expr':expr,'desc':desc})
+                cols = df.columns.tolist(); sample = df.head(3).to_dict(orient='records')
+                prompt = (
+                    f"You are a Python data engineer. DataFrame columns: {cols}. Sample rows: {sample}. "
+                    f"Generate a pandas eval expression for new column '{newc}' with logic: {desc}. Return only the expression string."
+                )
+                with st.spinner("Generating expression..."):
+                    resp = openai.ChatCompletion.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}])
+                expr = resp.choices[0].message.content.strip().strip('"')
+                st.code(f"df['{newc}'] = df.eval('{expr}')")
+                st.session_state.steps.append({'type':'compute','new':newc,'expr':expr,'desc':desc})
         elif op == 'drop_const':
             if st.button("Add Drop Constants"): st.session_state.steps.append({'type':'drop_const','desc':'Drop constants'})
         elif op == 'onehot':
@@ -214,12 +209,9 @@ with tabs[7]:
     key = st.session_state.current
     if not key:
         st.info("Select a dataset to access AI tools.")
-    elif not openai.api_key:
-        st.warning("Configure your OpenAI key in .streamlit/secrets.toml to use AI features.")
     else:
         df = st.session_state.datasets[key]
         tool = st.selectbox("Choose AI Tool:", ["Compute Column", "Natural Language Query", "Data Storytelling"])
-        # Compute Column tool
         if tool == "Compute Column":
             newc = st.text_input("New column name")
             desc = st.text_area("Describe logic in plain English")
@@ -234,7 +226,6 @@ with tabs[7]:
                 expr = resp.choices[0].message.content.strip().strip('"')
                 st.code(f"df['{newc}'] = df.eval('{expr}')")
                 st.session_state.steps.append({'type':'compute','new':newc,'expr':expr,'desc':desc})
-        # Natural Language Query tool
         elif tool == "Natural Language Query":
             query = st.text_area("Ask a question about your data")
             if st.button("Run Query"):
@@ -245,7 +236,6 @@ with tabs[7]:
                 with st.spinner("Querying..."):
                     resp = openai.ChatCompletion.create(model="gpt-4o-mini",messages=[{"role":"user","content":prompt}])
                 st.markdown(resp.choices[0].message.content)
-        # Data Storytelling tool
         else:
             summary_type = st.selectbox("Story for:", ["Entire Dataset", "Single Column"])
             if summary_type == "Single Column":
@@ -263,7 +253,7 @@ with tabs[7]:
                     cols = df.columns.tolist(); sample = df.head(5).to_dict(orient='records')
                     prompt = (
                         f"You are a data journalist. Columns: {cols}. Sample: {sample}. "
-                        "Write a detailed report summarizing key insights: distributions, correlations, missing data, business use cases. Markdown." )
+                        'Write a detailed report summarizing key insights: distributions, correlations, missing data, business use cases. Markdown.' )
                     with st.spinner("Writing report..."):
                         resp = openai.ChatCompletion.create(model="gpt-4o-mini",messages=[{"role":"user","content":prompt}])
                     st.markdown(resp.choices[0].message.content)
