@@ -27,7 +27,7 @@ st.title("🔮 Data Wizard X Pro — Next-Level ETL & Analysis")
 def ensure_state(key, default):
     if key not in st.session_state:
         st.session_state[key] = default
-for k,d in [('datasets', {}), ('current', None), ('versions', []), ('ops', [])]:
+for k, d in [('datasets', {}), ('current', None), ('versions', []), ('ops', [])]:
     ensure_state(k, d)
 
 # --- API Client with Caching ---
@@ -38,7 +38,6 @@ client = OpenAI(api_key=api_key)
 
 @st.cache_data(show_spinner=False)
 def ai_call(prompt: str) -> str:
-    """Cache AI responses for identical prompts."""
     logger.info(f"AI prompt: {prompt}")
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
@@ -115,8 +114,8 @@ class OneHotOp(TransformOp, op_type='onehot'):
 class JoinOp(TransformOp, op_type='join'):
     def apply(self, df):
         aux = st.session_state.datasets[self.params['aux']]
-        l, r, how = self.params['left'], self.params['right'], self.params.get('how','inner')
-        return df.merge(aux, left_on=l, right_on=r, how=how)
+        left, right, how = self.params['left'], self.params['right'], self.params.get('how','inner')
+        return df.merge(aux, left_on=left, right_on=right, how=how)
 
 class ImputeOp(TransformOp, op_type='impute'):
     def apply(self, df):
@@ -130,7 +129,6 @@ class ImputeOp(TransformOp, op_type='impute'):
 def run_pipeline(df):
     funcs = [TransformOp.registry[o['type']](**o).apply for o in st.session_state.ops]
     result = df.copy()
-    from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor() as ex:
         for fn in funcs:
             result = ex.submit(fn, result).result()
@@ -161,9 +159,12 @@ with tab_ds:
 with tab_tf:
     st.header("2. Transforms")
     key = st.session_state.current
-    if not key: st.info("Load a dataset first.")
+    if not key:
+        st.info("Load a dataset first.")
     else:
         df = st.session_state.datasets[key]
+        st.subheader("Current Preview")
+        st.data_editor(df, key=f"preview_before_{key}", use_container_width=True)
         op_types = list(TransformOp.registry.keys())
         op = st.selectbox("Operation", op_types)
         params = {}
@@ -175,13 +176,15 @@ with tab_tf:
                 params['expr'] = st.text_input("Filter expression (pandas query)")
             elif op == 'compute':
                 params['new'] = st.text_input("New column name")
-                logic = st.text_area("Describe logic")
+                logic = st.text_area("Describe logic (plain English)")
+                params['expr'] = st.text_input("Or enter pandas expression manually")
                 if st.form_submit_button("AI Generate Pandas"):
                     params['expr'] = clean_expr(ai_call(f"Pandas expression for {params['new']}: {logic}"))
                     st.code(params['expr'])
             elif op == 'sql':
                 params['new'] = st.text_input("New column name")
-                desc = st.text_area("Describe SQL logic")
+                desc = st.text_area("Describe SQL logic (plain English)")
+                params['sql'] = st.text_area("Or enter SQL manually")
                 if st.form_submit_button("AI Generate SQL"): 
                     params['sql'] = clean_expr(ai_call(f"SQL: SELECT *, {desc} AS {params['new']} FROM df"))
                     st.code(params['sql'])
@@ -194,7 +197,13 @@ with tab_tf:
                 params['how'] = st.selectbox("Join type", ['inner','left','right','outer'])
             submitted = st.form_submit_button("Add Operation")
             if submitted:
-                st.session_state.ops.append({'id':str(uuid.uuid4()), 'type':op, **params, 'desc': params.get('expr', params.get('sql',''))})
+                # Ensure required params exist
+                if op in ['filter','compute'] and not params.get('expr'):
+                    st.error("Expression required")
+                elif op == 'sql' and not params.get('sql'):
+                    st.error("SQL required")
+                else:
+                    st.session_state.ops.append({'id':str(uuid.uuid4()), 'type':op, **params, 'desc':params.get('expr', params.get('sql',''))})
         st.write("### Pipeline Steps")
         for i, s in enumerate(st.session_state.ops,1): st.write(f"{i}. {s['type']} — {s['desc']}")
         if st.button("Run Pipeline"):
@@ -206,7 +215,7 @@ with tab_tf:
 # --- 3. AI Toolkit ---
 with tab_ai:
     st.header("3. AI Toolkit")
-    st.write("Use the Transforms tab to integrate AI-powered code and SQL into your pipeline.")
+    st.write("Use the Transforms tab to integrate AI-powered Pandas & SQL code into your pipeline.")
 
 # --- 4. Profile ---
 with tab_prof:
@@ -221,13 +230,30 @@ with tab_exp:
     st.header("5. Export")
     df = st.session_state.datasets.get(st.session_state.current)
     if df is not None:
-        fmt = st.selectbox("Format", ['CSV','Parquet','Excel'])
-        if st.button("Export Data"):
-            if fmt=='CSV': st.download_button("CSV", df.to_csv(index=False).encode(), "data.csv")
-            elif fmt=='Parquet': st.download_button("Parquet", df.to_parquet(index=False), "data.parquet")
-            else:
-                buf = BytesIO(); df.to_excel(buf,index=False,engine='openpyxl')
-                st.download_button("Excel", buf.getvalue(), "data.xlsx")
+        fmt = st.selectbox("Format", ['CSV','Parquet','Excel','Snowflake'])
+        if fmt == 'Snowflake':
+            acc = st.text_input('Account')
+            user = st.text_input('User')
+            pwd = st.text_input('Password', type='password')
+            wh = st.text_input('Warehouse')
+            db = st.text_input('Database')
+            schema = st.text_input('Schema')
+            tbl = st.text_input('Table name')
+            if st.button('Write to Snowflake'):
+                conn = snowflake.connector.connect(
+                    user=user, password=pwd, account=acc,
+                    warehouse=wh, database=db, schema=schema
+                )
+                write_pandas(conn, df, tbl)
+                conn.close()
+                st.success(f"Written to {tbl} in Snowflake.")
+        else:
+            if st.button("Export Data"):
+                if fmt=='CSV': st.download_button("CSV", df.to_csv(index=False).encode(), "data.csv")
+                elif fmt=='Parquet': st.download_button("Parquet", df.to_parquet(index=False), "data.parquet")
+                else:
+                    buf = BytesIO(); df.to_excel(buf,index=False,engine='openpyxl')
+                    st.download_button("Excel", buf.getvalue(), "data.xlsx")
 
 # --- 6. History ---
 with tab_hist:
@@ -249,11 +275,11 @@ with tab_graph:
         if st.button("Generate Graph"):
             G = nx.Graph()
             for _, row in df.iterrows():
-                u, v = row[src], row[tgt]
+                u,v = row[src], row[tgt]
                 w = float(row[wt]) if wt and pd.notnull(row[wt]) else 1.0
-                G.add_edge(u, v, weight=G[u][v]['weight']+w if G.has_edge(u,v) else w)
-            edges = sorted(G.edges(data=True), key=lambda x: x[2]['weight'], reverse=True)
-            top5 = { (u,v) for u,v,_ in edges[:5] }
+                G.add_edge(u,v, weight=G[u][v]['weight']+w if G.has_edge(u,v) else w)
+            edges = sorted(G.edges(data=True), key=lambda x:x[2]['weight'], reverse=True)
+            top5 = {(u,v) for u,v,_ in edges[:5]}
             net = Network(height='600px', width='100%', bgcolor='#222222', font_color='white')
             net.show_buttons(filter_=['physics'])
             for n in G.nodes(): net.add_node(n, label=str(n), title=f"Degree: {G.degree(n)}", value=G.degree(n))
@@ -261,6 +287,5 @@ with tab_graph:
                 style = {'value':d['weight'], 'width':4 if (u,v) in top5 or (v,u) in top5 else 1,
                          'color':'red' if (u,v) in top5 or (v,u) in top5 else 'rgba(200,200,200,0.2)'}
                 net.add_edge(u, v, **style)
-            html = net.generate_html()
             import streamlit.components.v1 as components
-            components.html(html, height=650, scrolling=True)
+            components.html(net.generate_html(), height=650, scrolling=True)
