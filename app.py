@@ -13,6 +13,7 @@ from pyvis.network import Network
 import plotly.express as px
 from openai import OpenAI
 from pandasql import sqldf
+from sqlalchemy import create_engine
 from concurrent.futures import ThreadPoolExecutor
 
 # --- Logging Setup ---
@@ -52,8 +53,10 @@ def clean_expr(raw: str) -> str:
         lines = lines[1:]
     if lines and lines[-1].startswith("```"):
         lines = lines[:-1]
-    code_lines = [l.strip() for l in lines if re.search(r"\bdf\b|[+\-*/()]", l)]
-    return code_lines[-1] if code_lines else next((l for l in reversed(lines) if l.strip()), raw.strip())
+    for l in lines:
+        if 'df' in l and '=' not in l:
+            return l.strip()
+    return next((l for l in reversed(lines) if l.strip()), raw.strip())
 
 # --- File Loading Helper ---
 def load_file(f):
@@ -73,7 +76,6 @@ class TransformOp:
     def __init_subclass__(cls, op_type: str, **kwargs):
         super().__init_subclass__(**kwargs)
         TransformOp.registry[op_type] = cls
-        cls.op_type = op_type
     def __init__(self, **params):
         self.params = params
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -81,13 +83,11 @@ class TransformOp:
 
 class RenameOp(TransformOp, op_type='rename'):
     def apply(self, df):
-        old, new = self.params['old'], self.params['new']
-        return df.rename(columns={old:new})
+        return df.rename(columns={self.params['old']:self.params['new']})
 
 class FilterOp(TransformOp, op_type='filter'):
     def apply(self, df):
-        expr = self.params['expr']
-        try: return df.query(expr)
+        try: return df.query(self.params['expr'])
         except: return df
 
 class ComputeOp(TransformOp, op_type='compute'):
@@ -100,29 +100,37 @@ class ComputeOp(TransformOp, op_type='compute'):
 class SqlOp(TransformOp, op_type='sql'):
     def apply(self, df):
         sql = self.params['sql']
-        try: return sqldf(sql, {'df':df})
-        except: return df
+        engine = create_engine('sqlite:///:memory:')
+        df.to_sql('df', engine, index=False)
+        try:
+            return pd.read_sql(sql, engine)
+        except:
+            return df
 
 class DropConstOp(TransformOp, op_type='drop_const'):
-    def apply(self, df): return df.loc[:, df.nunique()>1]
+    def apply(self, df):
+        return df.loc[:, df.nunique()>1]
 
 class OneHotOp(TransformOp, op_type='onehot'):
     def apply(self, df):
-        cols = self.params.get('cols', [])
-        return pd.get_dummies(df, columns=cols)
+        return pd.get_dummies(df, columns=self.params.get('cols', []))
 
 class JoinOp(TransformOp, op_type='join'):
     def apply(self, df):
         aux = st.session_state.datasets[self.params['aux']]
-        left, right, how = self.params['left'], self.params['right'], self.params.get('how','inner')
-        return df.merge(aux, left_on=left, right_on=right, how=how)
+        return df.merge(aux,
+                        left_on=self.params['left'],
+                        right_on=self.params['right'],
+                        how=self.params.get('how','inner'))
 
 class ImputeOp(TransformOp, op_type='impute'):
     def apply(self, df):
         for c in df.columns:
             if df[c].isna().any():
-                if pd.api.types.is_numeric_dtype(df[c]): df[c] = df[c].fillna(df[c].median())
-                else: df[c] = df[c].fillna(df[c].mode().iloc[0])
+                df[c] = df[c].fillna(
+                    df[c].median() if pd.api.types.is_numeric_dtype(df[c])
+                    else df[c].mode().iloc[0]
+                )
         return df
 
 # --- Core Pipeline Execution with Parallelism ---
@@ -134,12 +142,13 @@ def run_pipeline(df):
             result = ex.submit(fn, result).result()
     return result
 
-# --- Streamlit UI Tabs ---
+# --- UI Tabs ---
 tab_ds, tab_tf, tab_ai, tab_prof, tab_exp, tab_hist, tab_graph = st.tabs([
-    '📂 Datasets','✏️ Transforms','🤖 AI Toolkit','📈 Profile','⬇️ Export','🕒 History','🕸️ Social Graph'
+    '📂 Datasets','✏️ Transforms','🤖 AI Toolkit',
+    '📈 Profile','⬇️ Export','🕒 History','🕸️ Social Graph'
 ])
 
-# --- 1. Datasets ---
+# 1. Datasets
 with tab_ds:
     st.header("1. Datasets")
     files = st.file_uploader("Upload CSV/Excel/Parquet/JSON", accept_multiple_files=True)
@@ -147,15 +156,15 @@ with tab_ds:
         for f in files:
             data = load_file(f)
             if isinstance(data, dict):
-                for sheet, df_sheet in data.items(): st.session_state.datasets[f"{f.name}:{sheet}"]=df_sheet
-            elif isinstance(data, pd.DataFrame): st.session_state.datasets[f.name]=data
+                for sheet,df_sheet in data.items(): st.session_state.datasets[f"{f.name}:{sheet}"]=df_sheet
+            elif isinstance(data,pd.DataFrame): st.session_state.datasets[f.name]=data
         st.success("Datasets loaded.")
     if st.session_state.datasets:
         sel = st.selectbox("Select dataset", list(st.session_state.datasets.keys()))
         st.session_state.current = sel
         st.data_editor(st.session_state.datasets[sel], key=f"ds_{sel}", use_container_width=True)
 
-# --- 2. Transforms ---
+# 2. Transforms
 with tab_tf:
     st.header("2. Transforms")
     key = st.session_state.current
@@ -163,7 +172,7 @@ with tab_tf:
         st.info("Load a dataset first.")
     else:
         df = st.session_state.datasets[key]
-        st.subheader("Current Preview")
+        st.subheader("Before Transformation Preview")
         st.data_editor(df, key=f"preview_before_{key}", use_container_width=True)
         op_types = list(TransformOp.registry.keys())
         op = st.selectbox("Operation", op_types)
@@ -177,17 +186,21 @@ with tab_tf:
             elif op == 'compute':
                 params['new'] = st.text_input("New column name")
                 logic = st.text_area("Describe logic (plain English)")
-                params['expr'] = st.text_input("Or enter pandas expression manually")
+                manual = st.text_input("Or enter expression manually")
                 if st.form_submit_button("AI Generate Pandas"):
                     params['expr'] = clean_expr(ai_call(f"Pandas expression for {params['new']}: {logic}"))
                     st.code(params['expr'])
+                else:
+                    params['expr'] = manual
             elif op == 'sql':
                 params['new'] = st.text_input("New column name")
                 desc = st.text_area("Describe SQL logic (plain English)")
-                params['sql'] = st.text_area("Or enter SQL manually")
+                manual_sql = st.text_area("Or enter SQL manually")
                 if st.form_submit_button("AI Generate SQL"): 
                     params['sql'] = clean_expr(ai_call(f"SQL: SELECT *, {desc} AS {params['new']} FROM df"))
                     st.code(params['sql'])
+                else:
+                    params['sql'] = manual_sql
             elif op == 'onehot':
                 params['cols'] = st.multiselect("Columns to one-hot encode", df.columns)
             elif op == 'join':
@@ -197,11 +210,11 @@ with tab_tf:
                 params['how'] = st.selectbox("Join type", ['inner','left','right','outer'])
             submitted = st.form_submit_button("Add Operation")
             if submitted:
-                # Ensure required params exist
+                # Validate
                 if op in ['filter','compute'] and not params.get('expr'):
-                    st.error("Expression required")
+                    st.error("Expression is required for compute/filter.")
                 elif op == 'sql' and not params.get('sql'):
-                    st.error("SQL required")
+                    st.error("SQL is required for SQL operations.")
                 else:
                     st.session_state.ops.append({'id':str(uuid.uuid4()), 'type':op, **params, 'desc':params.get('expr', params.get('sql',''))})
         st.write("### Pipeline Steps")
@@ -210,14 +223,14 @@ with tab_tf:
             out = run_pipeline(df)
             st.session_state.datasets[key] = out
             st.success("Pipeline applied.")
-            st.data_editor(out, key=f"tf_{key}", use_container_width=True)
+            st.data_editor(out, key=f"preview_after_{key}", use_container_width=True)
 
-# --- 3. AI Toolkit ---
+# 3. AI Toolkit
 with tab_ai:
     st.header("3. AI Toolkit")
-    st.write("Use the Transforms tab to integrate AI-powered Pandas & SQL code into your pipeline.")
+    st.write("Use the Transforms tab to integrate AI-powered transformations.")
 
-# --- 4. Profile ---
+# 4. Profile
 with tab_prof:
     st.header("4. Profile")
     df = st.session_state.datasets.get(st.session_state.current)
@@ -225,37 +238,28 @@ with tab_prof:
         stats = pd.DataFrame({'dtype':df.dtypes,'nulls':df.isna().sum(),'pct_null':df.isna().mean()*100})
         st.dataframe(stats, use_container_width=True)
 
-# --- 5. Export ---
+# 5. Export
 with tab_exp:
     st.header("5. Export")
     df = st.session_state.datasets.get(st.session_state.current)
     if df is not None:
         fmt = st.selectbox("Format", ['CSV','Parquet','Excel','Snowflake'])
         if fmt == 'Snowflake':
-            acc = st.text_input('Account')
-            user = st.text_input('User')
-            pwd = st.text_input('Password', type='password')
-            wh = st.text_input('Warehouse')
-            db = st.text_input('Database')
-            schema = st.text_input('Schema')
-            tbl = st.text_input('Table name')
+            acc = st.text_input('Account'); user=st.text_input('User'); pwd=st.text_input('Password',type='password')
+            wh=st.text_input('Warehouse'); db=st.text_input('Database'); schema=st.text_input('Schema'); tbl=st.text_input('Table name')
             if st.button('Write to Snowflake'):
                 conn = snowflake.connector.connect(
-                    user=user, password=pwd, account=acc,
-                    warehouse=wh, database=db, schema=schema
+                    user=user,password=pwd,account=acc,warehouse=wh,database=db,schema=schema
                 )
-                write_pandas(conn, df, tbl)
-                conn.close()
-                st.success(f"Written to {tbl} in Snowflake.")
+                write_pandas(conn, df, tbl); conn.close(); st.success(f"Written to {tbl}")
         else:
             if st.button("Export Data"):
-                if fmt=='CSV': st.download_button("CSV", df.to_csv(index=False).encode(), "data.csv")
-                elif fmt=='Parquet': st.download_button("Parquet", df.to_parquet(index=False), "data.parquet")
-                else:
-                    buf = BytesIO(); df.to_excel(buf,index=False,engine='openpyxl')
-                    st.download_button("Excel", buf.getvalue(), "data.xlsx")
+                buf = BytesIO()
+                if fmt=='CSV': st.download_button('CSV', df.to_csv(index=False).encode(), 'data.csv')
+                elif fmt=='Parquet': st.download_button('Parquet', df.to_parquet(index=False), 'data.parquet')
+                else: df.to_excel(buf,index=False,engine='openpyxl'); st.download_button('Excel',buf.getvalue(),'data.xlsx')
 
-# --- 6. History ---
+# 6. History
 with tab_hist:
     st.header("6. History")
     for i, snap in enumerate(st.session_state.versions,1):
@@ -263,16 +267,16 @@ with tab_hist:
             st.session_state.datasets[st.session_state.current] = snap
             st.experimental_rerun()
 
-# --- 7. Social Graph ---
+# 7. Social Graph
 with tab_graph:
     st.header("7. Social Network Graph")
     df = st.session_state.datasets.get(st.session_state.current)
     if df is not None:
-        src = st.selectbox("Source column", df.columns, key='sg_src')
-        tgt = st.selectbox("Target column", df.columns, key='sg_tgt')
+        src = st.selectbox('Source column', df.columns, key='sg_src')
+        tgt = st.selectbox('Target column', df.columns, key='sg_tgt')
         wt_opt = [None] + list(df.columns)
-        wt = st.selectbox("Weight column (optional)", wt_opt, key='sg_wt')
-        if st.button("Generate Graph"):
+        wt = st.selectbox('Weight column (optional)', wt_opt, key='sg_wt')
+        if st.button('Generate Graph'):
             G = nx.Graph()
             for _, row in df.iterrows():
                 u,v = row[src], row[tgt]
