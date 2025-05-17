@@ -22,7 +22,7 @@ for key, default in [('datasets', {}), ('current', None), ('steps', []), ('versi
         st.session_state[key] = default
 
 # --- OpenAI API Key (Directly in Code) ---
-openai.api_key = "sk-YOUR_OPENAI_API_KEY_HERE"
+openai.api_key = "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"
 
 # --- Helper Functions ---
 def get_sf_conn():
