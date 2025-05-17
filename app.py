@@ -6,14 +6,13 @@ from io import BytesIO
 from pandasql import sqldf
 import snowflake.connector
 from snowflake.connector.pandas_tools import write_pandas
-import yaml
 import networkx as nx
 from pyvis.network import Network
 import plotly.express as px
 
 # --- App Configuration ---
-st.set_page_config(page_title="Data Transformer Pro Plus", layout="wide")
-st.title("🛠️ Data Transformer Pro Plus — Robust ETL Web App")
+st.set_page_config(page_title="Data Wizard X", layout="wide")
+st.title("🔮 Data Wizard X — Smart ETL and Analysis Studio")
 
 # --- Session State Initialization ---
 for key, default in [('datasets', {}), ('current', None), ('steps', []), ('versions', [])]:
@@ -43,7 +42,6 @@ def load_file(uploader_file):
     return None
 
 def apply_steps(df):
-    # snapshot version
     ts = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
     st.session_state.versions.append((ts, df.copy()))
     for step in st.session_state.steps:
@@ -87,7 +85,7 @@ tabs = st.tabs([
     "⬇️ Export",
     "🕒 History",
     "⚙️ Snowflake",
-    "📜 Pipeline",
+    "🧠 Column Recommender",
     "🕸️ Social Graph"
 ])
 
@@ -132,7 +130,6 @@ with tabs[1]:
         elif op == 'compute':
             newc = st.text_input("New column name")
             st.write("Columns:", df.columns.tolist())
-            st.write("Functions: np.log(), np.sqrt(); prefix SQL:")
             expr2 = st.text_input("Formula or SQL:")
             if st.button("Add Compute"): 
                 st.session_state.steps.append({'type':'compute','new':newc,'expr':expr2,'desc':newc})
@@ -228,12 +225,17 @@ with tabs[6]:
     st.text_input("Database", key='sf_database')
     st.text_input("Schema", key='sf_schema')
 
-# --- 8. Pipeline YAML ---
+# --- 8. Column Recommender ---
 with tabs[7]:
-    st.header("8. Pipeline Configuration YAML")
-    yaml_str = yaml.dump({'pipeline_steps': st.session_state.steps}, sort_keys=False)
-    st.text_area("Pipeline YAML", yaml_str, height=300)
-    st.download_button("Download YAML", yaml_str, "pipeline.yaml")
+    st.header("8. Column Recommender")
+    key = st.session_state.current
+    if key:
+        df = st.session_state.datasets[key]
+        col = st.selectbox("Pick a column", df.columns)
+        if st.button("Recommend Similar Columns"):
+            ref = df[col]
+            sim_scores = df.corrwith(ref) if np.issubdtype(ref.dtype, np.number) else df.select_dtypes('object').apply(lambda x: (ref == x).mean())
+            st.write(sim_scores.sort_values(ascending=False).head(5))
 
 # --- 9. Social Graph ---
 with tabs[8]:
