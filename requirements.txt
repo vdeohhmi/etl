@@ -1,11 +1,11 @@
-# streamlit
-# polars
-# pandas
-# numpy
-# snowflake-connector-python
-# openai
-# sqlalchemy
-# dask[complete]
-# streamlit-aggrid
-# networkx
-# plotly
+streamlit
+polars
+pandas
+numpy
+snowflake-connector-python
+openai
+sqlalchemy
+dask[complete]
+streamlit-aggrid
+networkx
+plotly
