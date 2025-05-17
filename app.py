@@ -10,6 +10,7 @@ from sqlalchemy import create_engine
 import networkx as nx
 from pyvis.network import Network
 import plotly.express as px
+import re
 
 # --- App Configuration ---
 st.set_page_config(page_title="Data Wizard X Pro", layout="wide")
@@ -25,7 +26,7 @@ for name, default in [('datasets', {}), ('current_df', None)]:
 # --- OpenAI Client ---
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
-    st.error("Please set the OPENAI_API_KEY environment variable to enable AI features.")
+    st.error("Please set the OPENAI_API_KEY environment variable for AI features.")
 client = OpenAI(api_key=api_key)
 
 # --- AI Helpers ---
@@ -33,8 +34,8 @@ client = OpenAI(api_key=api_key)
 def ai_pandas_expr(new_col: str, logic: str, sample: pd.DataFrame) -> str:
     prompt = (
         f"You are a Python data engineer. Given sample rows {sample.to_dict('records')} "
-        f"and the requirement: {logic}, generate a valid pandas expression to compute '{new_col}'. "
-        "Respond with only the expression, no extra text."
+        f"and the requirement: {logic}, generate a valid pandas eval expression for '{new_col}'. "
+        "Respond with only the expression."
     )
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
@@ -45,14 +46,31 @@ def ai_pandas_expr(new_col: str, logic: str, sample: pd.DataFrame) -> str:
 @st.cache_data
 def ai_sql_expr(new_col: str, logic: str) -> str:
     prompt = (
-        f"You are a SQL expert. Using a table named 'df', write a SELECT query that returns *, and adds a new column '{new_col}' "
-        f"calculated as {logic}. Return only the full SQL query, no comments or explanation."
+        f"You are a SQL expert working with SQLite. Using a table named 'df', write a SELECT query that returns *, "
+        f"and computes a new column '{new_col}' as {logic}. Use SQLite functions like julianday for date diffs. "
+        "Return only the SQL query, no explanations."
     )
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role":"user","content":prompt}]
     )
-    return resp.choices[0].message.content.strip().strip('`')
+    sql = resp.choices[0].message.content.strip().strip('`')
+    return normalize_sql(sql)
+
+# --- Normalize SQL ---
+def normalize_sql(sql: str) -> str:
+    # Remove leading 'sql' or similar
+    sql = sql.strip().lstrip(';')
+    if re.match(r'^[sS][qQ][lL]\s+', sql):
+        sql = re.sub(r'^[sS][qQ][lL]\s+', '', sql)
+    # Replace DATEDIFF with SQLite-compatible expression
+    # Pattern: DATEDIFF(col2, col1) -> julianday(col2) - julianday(col1)
+    def repl(match):
+        cols = match.group(1)
+        a, b = [c.strip() for c in cols.split(',')]
+        return f"(julianday({a}) - julianday({b}))"
+    sql = re.sub(r'DATEDIFF\s*\(([^)]+)\)', repl, sql, flags=re.IGNORECASE)
+    return sql
 
 # --- File Loading ---
 def load_file(f) -> pd.DataFrame:
@@ -75,9 +93,9 @@ tab_ds, tab_tf, tab_ai, tab_pr, tab_ex, tab_graph, tab_sf = st.tabs([
 # 1) Datasets
 with tab_ds:
     st.header("1. Datasets")
-    files = st.file_uploader("Upload CSV/Excel/Parquet/JSON", accept_multiple_files=True)
-    if files:
-        for f in files:
+    uploads = st.file_uploader("Upload CSV/Excel/Parquet/JSON", accept_multiple_files=True)
+    if uploads:
+        for f in uploads:
             df = load_file(f)
             if df is not None:
                 st.session_state.datasets[f.name] = df
@@ -101,31 +119,13 @@ with tab_tf:
         op = st.selectbox("Operation", [
             'Rename Column','Filter Rows','Compute Column','SQL Transform',
             'Drop Constant Columns','One-Hot Encode','Impute Missing'
-        ], key='op_tf')
+        ])
 
-        # Rename
-        if op=='Rename Column':
-            old = st.selectbox("Old Column", df.columns)
-            new = st.text_input("New Column Name")
-            if st.button("Apply Rename"):
-                df = df.rename(columns={old:new})
-                st.session_state.datasets[key] = df
-                st.success(f"Renamed '{old}' to '{new}'.")
-
-        # Filter
-        if op=='Filter Rows':
-            expr = st.text_input("Pandas query (e.g. age > 30)")
-            if st.button("Apply Filter") and expr:
-                df = df.query(expr)
-                st.session_state.datasets[key] = df
-                st.success("Filter applied.")
-
-        # Compute
-        if op=='Compute Column':
-            new_col = st.text_input("New Column Name", key='comp_new')
-            logic = st.text_area("Logic (plain English)", key='comp_logic')
-            manual = st.text_input("Or manual pandas expression", key='comp_manual')
-            if st.button("Generate Expression"):  # key-less single
+        if op == 'Compute Column':
+            new_col = st.text_input("New Column Name")
+            logic = st.text_area("Logic (plain English)")
+            manual = st.text_input("Or manual pandas expression")
+            if st.button("Generate Expression via AI"):
                 expr = ai_pandas_expr(new_col, logic, df.head(3))
                 st.code(expr)
             else:
@@ -138,12 +138,11 @@ with tab_tf:
                 except Exception as e:
                     st.error(f"Compute failed: {e}")
 
-        # SQL Transform
-        if op=='SQL Transform':
-            new_col_sql = st.text_input("New Column Name (SQL)", key='sql_new')
-            logic_sql = st.text_area("Logic (plain English for SQL)", key='sql_logic')
-            manual_sql = st.text_area("Or manual SQL query (use 'df' as table)", key='sql_manual')
-            if st.button("Generate SQL"):  # generate via AI
+        if op == 'SQL Transform':
+            new_col_sql = st.text_input("New Column Name (SQL)")
+            logic_sql = st.text_area("Logic (plain English for SQL)")
+            manual_sql = st.text_area("Or manual SQL query (use 'df' as table)")
+            if st.button("Generate SQL via AI"):
                 sql = ai_sql_expr(new_col_sql, logic_sql)
                 st.code(sql)
             else:
@@ -158,38 +157,46 @@ with tab_tf:
                 except Exception as e:
                     st.error(f"SQL failed: {e}")
 
-        # Drop constants
-        if op=='Drop Constant Columns' and st.button("Apply Drop Constants"):
+        # Other ops
+        if op == 'Rename Column':
+            old = st.selectbox("Old column", df.columns)
+            new = st.text_input("New column name rename")
+            if st.button("Apply Rename"):
+                df = df.rename(columns={old:new})
+                st.session_state.datasets[key] = df
+                st.success("Rename applied.")
+        if op == 'Filter Rows':
+            expr = st.text_input("Filter expression (e.g. age>30)")
+            if st.button("Apply Filter") and expr:
+                df = df.query(expr)
+                st.session_state.datasets[key] = df
+                st.success("Filter applied.")
+        if op == 'Drop Constant Columns' and st.button("Apply Drop Constants"):
             df = df.loc[:, df.nunique()>1]
             st.session_state.datasets[key] = df
             st.success("Dropped constant columns.")
-
-        # One-hot
-        if op=='One-Hot Encode':
-            cols = st.multiselect("Columns to encode", df.select_dtypes('object').columns)
+        if op == 'One-Hot Encode':
+            cols = st.multiselect("One-hot columns", df.select_dtypes('object').columns)
             if st.button("Apply One-Hot") and cols:
                 df = pd.get_dummies(df, columns=cols)
                 st.session_state.datasets[key] = df
-                st.success("One-hot encoding applied.")
-
-        # Impute
-        if op=='Impute Missing' and st.button("Apply Impute"):
+                st.success("One-hot applied.")
+        if op == 'Impute Missing' and st.button("Apply Impute"):
             for c in df.columns:
                 if df[c].isna().any():
                     df[c] = df[c].fillna(
                         df[c].median() if pd.api.types.is_numeric_dtype(df[c]) else df[c].mode()[0]
                     )
             st.session_state.datasets[key] = df
-            st.success("Imputation complete.")
+            st.success("Impute complete.")
 
-        # Updated Preview
         st.subheader("Updated Preview")
         st.dataframe(st.session_state.datasets[key].head(5), use_container_width=True)
 
 # 3) AI Toolkit
 with tab_ai:
     st.header("3. AI Toolkit")
-    st.write("Generate expressions in Transform tab using AI.")
+    st.write("Use Transform tab's AI buttons to generate expressions.")
 
 # 4) Profile
 with tab_pr:
@@ -198,9 +205,9 @@ with tab_pr:
     if key:
         df = st.session_state.datasets[key]
         stats = pd.DataFrame({
-            'dtype':df.dtypes,
-            'nulls':df.isna().sum(),
-            'pct_null':df.isna().mean()*100
+            'dtype': df.dtypes,
+            'nulls': df.isna().sum(),
+            'pct_null': df.isna().mean()*100
         })
         st.dataframe(stats, use_container_width=True)
 
@@ -210,18 +217,18 @@ with tab_ex:
     key = st.session_state.current_df
     if key:
         df = st.session_state.datasets[key]
-        fmt = st.selectbox("Format", ['CSV','Excel','Parquet','Snowflake'], key='ex_fmt')
+        fmt = st.selectbox("Format", ['CSV','Excel','Parquet','Snowflake'])
         if fmt!='Snowflake' and st.button("Download File"):
             buf = BytesIO()
             if fmt=='CSV':
                 st.download_button("CSV", df.to_csv(index=False).encode(),"data.csv")
             elif fmt=='Excel':
                 df.to_excel(buf,index=False,engine='openpyxl')
-                st.download_button("Excel", buf.getvalue(),"data.xlsx")
+                st.download_button("Excel",buf.getvalue(),"data.xlsx")
             else:
                 st.download_button("Parquet", df.to_parquet(index=False),"data.parquet")
         if fmt=='Snowflake':
-            st.info("Configure Snowflake in the last tab and click Write to Snowflake.")
+            st.info("Use Snowflake tab to configure and write.")
 
 # 6) Graph
 with tab_graph:
@@ -229,21 +236,21 @@ with tab_graph:
     key = st.session_state.current_df
     if key:
         df = st.session_state.datasets[key]
-        src = st.selectbox("Source", df.columns, key='g_src')
-        tgt = st.selectbox("Target", df.columns, key='g_tgt')
-        wt = st.selectbox("Weight (optional)", [None]+list(df.columns), key='g_wt')
+        src = st.selectbox("Source col", df.columns)
+        tgt = st.selectbox("Target col", df.columns)
+        wt = st.selectbox("Weight col (optional)", [None]+list(df.columns))
         if st.button("Generate Graph"):
             G = nx.Graph()
             for _,r in df.iterrows():
-                u,v = r[src], r[tgt]
+                u,v = r[src],r[tgt]
                 w = float(r[wt]) if wt else 1.0
-                G.add_edge(u, v, weight=w)
+                G.add_edge(u,v,weight=w)
             net = Network(height="600px",width="100%",bgcolor="#222222",font_color="white")
             net.show_buttons(filter_=['physics'])
             for n in G.nodes(): net.add_node(n,label=str(n),title=f"Degree:{G.degree(n)}",value=G.degree(n))
             for u,v,d in G.edges(data=True): net.add_edge(u,v,value=d['weight'],width=2)
             html = net.generate_html()
-            import streamlit.components.v1 as components; components.html(html, height=650)
+            import streamlit.components.v1 as components; components.html(html,height=650)
 
 # 7) Snowflake
 with tab_sf:
@@ -255,7 +262,7 @@ with tab_sf:
     db = st.text_input("Database")
     sc = st.text_input("Schema")
     tbl = st.text_input("Table Name")
-    if st.button("Write to Snowflake") and acc and usr and pwd and wh and db and sc and tbl:
+    if st.button("Write to Snowflake") and all([acc,usr,pwd,wh,db,sc,tbl]):
         df = st.session_state.datasets[key]
         conn = snowflake.connector.connect(
             user=usr,password=pwd,account=acc,
