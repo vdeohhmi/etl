@@ -21,28 +21,37 @@ for key, default in [('datasets', {}), ('current', None), ('steps', []), ('versi
     if key not in st.session_state:
         st.session_state[key] = default
 
-# --- OpenAI API Key (Directly in Code) ---
-os.environ["OPENAI_API_KEY"] = "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"
-client = OpenAI()  # v1 client
+# --- OpenAI API Key (from ENV) ---
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    st.warning(
+        "OpenAI API key not found—please set the OPENAI_API_KEY environment variable "
+        "(e.g. `export OPENAI_API_KEY=sk-…` before running`)."
+    )
+client = OpenAI(api_key=api_key)
 
 # --- Helper Functions ---
 def get_sf_conn():
     return snowflake.connector.connect(
-        user=st.session_state.get('sf_account',''),
-        password=st.session_state.get('sf_password',''),
-        account=st.session_state.get('sf_account',''),
-        warehouse=st.session_state.get('sf_warehouse',''),
-        database=st.session_state.get('sf_database',''),
-        schema=st.session_state.get('sf_schema','')
+        user=st.session_state.get('sf_user', ''),
+        password=st.session_state.get('sf_password', ''),
+        account=st.session_state.get('sf_account', ''),
+        warehouse=st.session_state.get('sf_warehouse', ''),
+        database=st.session_state.get('sf_database', ''),
+        schema=st.session_state.get('sf_schema', '')
     )
 
 def load_file(uploader_file):
     ext = uploader_file.name.split('.')[-1].lower()
     try:
-        if ext == 'csv': return pd.read_csv(uploader_file)
-        if ext in ['xls','xlsx']: return pd.read_excel(uploader_file, sheet_name=None)
-        if ext == 'parquet': return pd.read_parquet(uploader_file)
-        if ext == 'json': return pd.read_json(uploader_file)
+        if ext == 'csv':
+            return pd.read_csv(uploader_file)
+        if ext in ['xls','xlsx']:
+            return pd.read_excel(uploader_file, sheet_name=None)
+        if ext == 'parquet':
+            return pd.read_parquet(uploader_file)
+        if ext == 'json':
+            return pd.read_json(uploader_file)
     except Exception as e:
         st.error(f"Failed to load {uploader_file.name}: {e}")
     return None
@@ -55,8 +64,10 @@ def apply_steps(df):
         if t == 'rename':
             df = df.rename(columns={step['old']: step['new']})
         elif t == 'filter' and step.get('expr'):
-            try: df = df.query(step['expr'])
-            except: pass
+            try:
+                df = df.query(step['expr'])
+            except:
+                pass
         elif t == 'compute' and step.get('expr'):
             try:
                 df[step['new']] = df.eval(step['expr'])
@@ -72,10 +83,12 @@ def apply_steps(df):
         elif t == 'join':
             aux = st.session_state.datasets.get(step['aux'])
             if aux is not None:
-                df = df.merge(aux,
-                              left_on=step['left'],
-                              right_on=step['right'],
-                              how=step['how'])
+                df = df.merge(
+                    aux,
+                    left_on=step['left'],
+                    right_on=step['right'],
+                    how=step['how']
+                )
         elif t == 'impute':
             for c in df.columns:
                 if df[c].isna().any():
@@ -138,11 +151,10 @@ with tabs[1]:
         df = st.session_state.datasets[key]
         for i, step in enumerate(st.session_state.steps):
             st.write(f"{i+1}. {step['type']} — {step.get('desc','')}")
-        op = st.selectbox(
-            "Operation",
-            ['rename','filter','compute','drop_const','onehot','join','impute'],
-            key='op'
-        )
+        op = st.selectbox("Operation", [
+            'rename','filter','compute','drop_const',
+            'onehot','join','impute'
+        ], key='op')
 
         if op == 'rename':
             old = st.selectbox("Old column", df.columns, key='rename_old')
@@ -168,8 +180,9 @@ with tabs[1]:
                 sample = df.head(3).to_dict(orient='records')
                 prompt = (
                     f"You are a Python data engineer. Columns: {cols}. "
-                    f"Sample rows: {sample}. Generate a pandas eval expression "
-                    f"for new column '{newc}' with logic: {desc}. Return only the expression."
+                    f"Sample rows: {sample}. Generate a pandas eval "
+                    f"expression for new column '{newc}' with logic: {desc}. "
+                    "Return only the expression."
                 )
                 with st.spinner("Generating expression..."):
                     resp = client.chat.completions.create(
@@ -247,7 +260,7 @@ with tabs[2]:
         stats = pd.DataFrame({
             'dtype': df.dtypes,
             'nulls': df.isna().sum(),
-            'null_pct': df.isna().mean()*100
+            'null_pct': df.isna().mean() * 100
         })
         st.dataframe(stats, use_container_width=True)
 
@@ -259,8 +272,10 @@ with tabs[3]:
         df = st.session_state.datasets[key]
         num = df.select_dtypes('number')
         if not num.empty:
-            st.plotly_chart(px.imshow(num.corr(), text_auto=True),
-                            use_container_width=True)
+            st.plotly_chart(
+                px.imshow(num.corr(), text_auto=True),
+                use_container_width=True
+            )
 
 # --- 5. Export ---
 with tabs[4]:
@@ -305,10 +320,7 @@ with tabs[4]:
                     key='dl_excel'
                 )
             else:
-                tbl = st.text_input(
-                    "Snowflake table name",
-                    key='exp_tbl'
-                )
+                tbl = st.text_input("Snowflake table name", key='exp_tbl')
                 if st.button("Write to Snowflake", key='btn_sf'):
                     conn = get_sf_conn()
                     write_pandas(conn, df, tbl)
@@ -345,13 +357,10 @@ with tabs[7]:
         st.info("Select a dataset to access AI tools.")
     else:
         df = st.session_state.datasets[key]
-        tool = st.selectbox(
-            "Choose AI Tool:",
-            ["Compute Column", "Natural Language Query", "Data Storytelling"],
-            key='ai_tool'
-        )
+        tool = st.selectbox("Choose AI Tool:", [
+            "Compute Column", "Natural Language Query", "Data Storytelling"
+        ], key='ai_tool')
 
-        # Compute Column
         if tool == "Compute Column":
             newc = st.text_input("New column name", key='ai_newc')
             desc = st.text_area("Describe logic in plain English", key='ai_desc')
@@ -374,7 +383,6 @@ with tabs[7]:
                     'type':'compute','new':newc,'expr':expr,'desc':desc
                 })
 
-        # Natural Language Query
         elif tool == "Natural Language Query":
             query = st.text_area("Ask a question about your data", key='ai_query')
             if st.button("Run Query", key='ai_query_btn'):
@@ -391,13 +399,10 @@ with tabs[7]:
                     )
                 st.markdown(resp.choices[0].message.content)
 
-        # Data Storytelling
-        else:
-            summary_type = st.selectbox(
-                "Story for:",
-                ["Entire Dataset", "Single Column"],
-                key='ai_story_type'
-            )
+        else:  # Data Storytelling
+            summary_type = st.selectbox("Story for:", [
+                "Entire Dataset", "Single Column"
+            ], key='ai_story_type')
             if summary_type == "Single Column":
                 col = st.selectbox("Column", df.columns, key='ai_story_col')
                 if st.button("Generate Story", key='ai_story_btn'):
@@ -405,7 +410,8 @@ with tabs[7]:
                     sample = df.head(5).to_dict(orient='records')
                     prompt = (
                         f"You are a data journalist. Columns: {cols}. Sample: {sample}. "
-                        f"Analyze column '{col}': discuss distribution, missing data, outliers, implications. Provide markdown."
+                        f"Analyze column '{col}': discuss distribution, missing data, "
+                        "outliers, implications. Provide markdown."
                     )
                     with st.spinner("Writing story..."):
                         resp = client.chat.completions.create(
@@ -419,7 +425,8 @@ with tabs[7]:
                     sample = df.head(5).to_dict(orient='records')
                     prompt = (
                         f"You are a data journalist. Columns: {cols}. Sample: {sample}. "
-                        "Write a detailed report summarizing key insights: distributions, correlations, missing data, business use cases. Markdown."
+                        "Write a detailed report summarizing key insights: distributions, "
+                        "correlations, missing data, business use cases. Markdown."
                     )
                     with st.spinner("Writing report..."):
                         resp = client.chat.completions.create(
