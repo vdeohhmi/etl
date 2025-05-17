@@ -10,7 +10,8 @@ from snowflake.connector.pandas_tools import write_pandas
 from openai import OpenAI
 from sqlalchemy import create_engine
 import dask.dataframe as dd
-from streamlit_aggrid import AgGrid, GridOptionsBuilder
+# Correct AgGrid import
+from st_aggrid import AgGrid, GridOptionsBuilder
 import networkx as nx
 import plotly.graph_objects as go
 import plotly.express as px
@@ -43,9 +44,7 @@ def ai_polars_expr(newcol, logic, sample: pl.DataFrame) -> str:
         f"You are a Polars data engineer. Given sample rows {sample.to_dicts()} and logic: '{logic}', "
         f"generate a Polars expression to create a new column '{newcol}'. Return only the expression."
     )
-    resp = client.chat.completions.create(
-        model='gpt-4o-mini', messages=[{'role':'user','content':prompt}]
-    )
+    resp = client.chat.completions.create(model='gpt-4o-mini',messages=[{'role':'user','content':prompt}])
     return resp.choices[0].message.content.strip().strip('`')
 
 @st.cache_data
@@ -54,9 +53,7 @@ def ai_dask_query(logic, columns):
         f"You are a Dask data engineer. Given columns {columns} and logic: '{logic}', "
         "generate a Dask dataframe filter expression. Return only the expression."
     )
-    resp = client.chat.completions.create(
-        model='gpt-4o-mini', messages=[{'role':'user','content':prompt}]
-    )
+    resp = client.chat.completions.create(model='gpt-4o-mini',messages=[{'role':'user','content':prompt}])
     return resp.choices[0].message.content.strip().strip('`')
 
 @st.cache_data
@@ -65,27 +62,19 @@ def ai_sql_query(newcol, logic):
         f"You are a SQL expert using SQLite. Table is named 'df'. Write a SELECT *, "
         f"{logic} AS {newcol} FROM df; Return only the SQL query."
     )
-    resp = client.chat.completions.create(
-        model='gpt-4o-mini', messages=[{'role':'user','content':prompt}]
-    )
+    resp = client.chat.completions.create(model='gpt-4o-mini',messages=[{'role':'user','content':prompt}])
     return normalize_sql(resp.choices[0].message.content.strip().strip('`'))
 
 def normalize_sql(sql: str) -> str:
-    # Clean leading/trailing
     sql = sql.strip().lstrip('sql ').lstrip(';')
-    # Ensure single SELECT *
-    # Remove any repeated 'SELECT *'
     selects = re.findall(r'(?i)select\s*\*', sql)
     if len(selects) > 1:
-        # Keep only first
         sql = re.sub(r'(?i)select\s*\*', '', sql, count=len(selects)-1)
         sql = 'SELECT * ' + sql
-    # Convert DATEDIFF to julianday diff
     def repl(m):
         a, b = [c.strip() for c in m.group(1).split(',')]
         return f"(julianday({a}) - julianday({b}))"
     sql = re.sub(r'(?i)DATEDIFF\s*\(([^)]+)\)', repl, sql)
-    # Ensure FROM df present
     if 'from df' not in sql.lower():
         if 'select' in sql.lower():
             sql = sql.replace('SELECT *', 'SELECT * FROM df')
@@ -121,7 +110,7 @@ with tabs[0]:
                 st.session_state.datasets[f.name] = df
         st.success('Datasets loaded.')
     if st.session_state.datasets:
-        key = st.selectbox('Select dataset', list(st.session_state.datasets.keys()), key='ds_sel')
+        key = st.selectbox('Select dataset', list(st.session_state.datasets.keys()))
         st.session_state.current = key
         df = st.session_state.datasets[key]
         gb = GridOptionsBuilder.from_dataframe(df.to_pandas())
@@ -138,8 +127,8 @@ with tabs[1]:
         df_pl = st.session_state.datasets[key]
         st.subheader('Preview Before')
         AgGrid(df_pl.to_pandas(), enable_enterprise_modules=False)
+        op = st.selectbox('Operation', ['Polars Compute','Dask Filter','SQL Execute','Drop Const','One-Hot','Impute'])
 
-        op = st.selectbox('Operation', ['Polars Compute','Dask Filter','SQL Execute','Drop Const','One-Hot','Impute'], key='op')
         # Polars Compute
         if op=='Polars Compute':
             newcol = st.text_input('New column name')
@@ -157,6 +146,7 @@ with tabs[1]:
                     st.experimental_rerun()
                 except Exception as e:
                     st.error(f'Polars compute failed: {e}')
+
         # Dask Filter
         if op=='Dask Filter':
             logic = st.text_area('Filter logic (English)')
@@ -175,6 +165,7 @@ with tabs[1]:
                     st.experimental_rerun()
                 except Exception as e:
                     st.error(f'Dask filter failed: {e}')
+
         # SQL Execute
         if op=='SQL Execute':
             newcol = st.text_input('New column name (SQL)')
@@ -195,16 +186,20 @@ with tabs[1]:
                     st.experimental_rerun()
                 except Exception as e:
                     st.error(f'SQL execution failed: {e}')
+
         # Drop constant columns
         if op=='Drop Const' and st.button('Apply Drop Constants'):
             df_new = df_pl.select(pl.exclude(pl.all().filter(lambda s: df_pl[n := s.name].n_unique() <= 1)))
             st.session_state.datasets[key] = df_new
             st.experimental_rerun()
+
         # One-Hot Encode
         if op=='One-Hot' and st.button('Apply One-Hot'):
-            df_new = pd.get_dummies(df_pl.to_pandas())
-            st.session_state.datasets[key] = pl.from_pandas(df_new)
+            df_new_pd = pd.get_dummies(df_pl.to_pandas())
+            df_new = pl.from_pandas(df_new_pd)
+            st.session_state.datasets[key] = df_new
             st.experimental_rerun()
+
         # Impute Missing
         if op=='Impute' and st.button('Apply Impute'):
             df_new = df_pl.fill_null(strategy='median')
