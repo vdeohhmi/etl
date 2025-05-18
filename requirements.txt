@@ -1,6 +1,7 @@
 streamlit
 polars
 pandas
+openpyxl
 numpy
 snowflake-connector-python
 openai
