@@ -1,27 +1,14 @@
 streamlit
-polars
 pandas
-openpyxl
 numpy
-snowflake-connector-python
-openai
-sqlalchemy
-dask[complete]
-streamlit-aggrid
-networkx
-plotly
+pandasql
+pyarrow
+openpyxl
 xlrd
-streamlit
- polars
-pandas
-openpyxl
- xlrd
-numpy
-snowflake-connector-python
-openai
 sqlalchemy
-dask[complete]
-streamlit-aggrid
+snowflake-connector-python
+pyyaml
 networkx
+pyvis
 plotly
-
+tableauserverclient
