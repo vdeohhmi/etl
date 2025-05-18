@@ -2,13 +2,10 @@ streamlit
 pandas
 numpy
 pandasql
-pyarrow
-openpyxl
-xlrd
-sqlalchemy
-snowflake-connector-python
-pyyaml
+snowflake-connector-python[pandas]
+PyYAML
 networkx
 pyvis
 plotly
-tableauserverclient
+openpyxl
+pyarrow
