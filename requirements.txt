@@ -11,3 +11,17 @@ streamlit-aggrid
 networkx
 plotly
 xlrd
+streamlit
+ polars
+pandas
+openpyxl
+ xlrd
+numpy
+snowflake-connector-python
+openai
+sqlalchemy
+dask[complete]
+streamlit-aggrid
+networkx
+plotly
+
