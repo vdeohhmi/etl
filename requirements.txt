@@ -10,3 +10,4 @@ dask[complete]
 streamlit-aggrid
 networkx
 plotly
+xlrd
