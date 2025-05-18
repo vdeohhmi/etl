@@ -49,8 +49,12 @@ def load_file(uploader_file):
     try:
         if ext == 'csv':
             return pd.read_csv(uploader_file)
-        elif ext in ['xls', 'xlsx']:
-            return pd.read_excel(uploader_file, sheet_name=None)
+        elif ext == 'xls':
+            # .xls support requires xlrd
+            return pd.read_excel(uploader_file, sheet_name=None, engine='xlrd')
+        elif ext == 'xlsx':
+            # .xlsx support via openpyxl
+            return pd.read_excel(uploader_file, sheet_name=None, engine='openpyxl')
         elif ext == 'parquet':
             return pd.read_parquet(uploader_file)
         elif ext == 'json':
@@ -61,7 +65,6 @@ def load_file(uploader_file):
 
 
 def apply_steps(df):
-    # Snapshot before transform
     ts = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
     st.session_state.versions.append((ts, df.copy()))
     for step in st.session_state.steps:
@@ -125,8 +128,7 @@ with tabs[1]:
                 st.session_state.steps.append({'type':'filter','expr':expr,'desc':expr})
         elif op == 'compute':
             newc = st.text_input("New column name")
-            st.write("Use pandas eval expressions")
-            expr2 = st.text_input("Formula:")
+            expr2 = st.text_input("Formula (pandas eval):")
             if st.button("Add Compute"):
                 st.session_state.steps.append({'type':'compute','new':newc,'expr':expr2,'desc':newc})
         elif op == 'drop_const':
@@ -151,7 +153,7 @@ with tabs[1]:
             st.success("Transformations applied.")
             st.data_editor(st.session_state.datasets[key], key=f"transformed_{key}", use_container_width=True)
 
-# --- 3. Profile / Export ---
+# --- 3. Profile & Export ---
 with tabs[2]:
     st.header("3. Profile & Export")
     df = st.session_state.datasets.get(st.session_state.current)
