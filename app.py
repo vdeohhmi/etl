@@ -1,295 +1,408 @@
 import os
-import re
 import streamlit as st
-import polars as pl
 import pandas as pd
 import numpy as np
 from io import BytesIO
+from pandasql import sqldf
 import snowflake.connector
 from snowflake.connector.pandas_tools import write_pandas
-from openai import OpenAI
-from sqlalchemy import create_engine
-import dask.dataframe as dd
-from st_aggrid import AgGrid, GridOptionsBuilder
+import yaml
 import networkx as nx
-import plotly.graph_objects as go
+from pyvis.network import Network
 import plotly.express as px
 
 # --- App Configuration ---
-st.set_page_config(page_title="Data Wizard X Pro", layout="wide")
-st.title("🔮 Data Wizard X Pro — Polars, Dask & AI-Driven Visuals")
+st.set_page_config(page_title="Data Transformer Pro Plus", layout="wide")
+st.title("🛠️ Data Transformer Pro Plus — Robust ETL Web App")
 
 # --- Session State Initialization ---
-def init_state(key, default):
+for key, default in [('datasets', {}), ('current', None), ('steps', []), ('versions', [])]:
     if key not in st.session_state:
         st.session_state[key] = default
-for k, v in [('datasets', {}), ('current', None)]:
-    init_state(k, v)
 
-# --- OpenAI Client ---
-api_key = os.getenv('OPENAI_API_KEY')
-if not api_key:
-    st.error('Please set OPENAI_API_KEY environment variable to enable AI features.')
-client = OpenAI(api_key=api_key)
-
-# --- Helpers ---
-def sanitize_cols(pl_df: pl.DataFrame) -> pl.DataFrame:
-    cols = [re.sub(r'[^0-9a-z_]+','_',c.strip().lower().replace(' ','_')) for c in pl_df.columns]
-    return pl_df.rename({old:new for old,new in zip(pl_df.columns,cols)})
-
-@st.cache_data
-def ai_generate_code(prompt:str) -> str:
-    resp = client.chat.completions.create(
-        model='gpt-4o-mini',
-        messages=[{'role':'user','content':prompt}]
+# --- Helper Functions ---
+def get_sf_conn():
+    # Connect to Snowflake using provided credentials
+    return snowflake.connector.connect(
+        user=st.session_state.get('sf_user', ''),
+        password=st.session_state.get('sf_password', ''),
+        account=st.session_state.get('sf_account', ''),
+        warehouse=st.session_state.get('sf_warehouse', ''),
+        database=st.session_state.get('sf_database', ''),
+        schema=st.session_state.get('sf_schema', '')
+        user=st.session_state.get('sf_user',''),
+        password=st.session_state.get('sf_password',''),
+        account=st.session_state.get('sf_account',''),
+        warehouse=st.session_state.get('sf_warehouse',''),
+        database=st.session_state.get('sf_database',''),
+        schema=st.session_state.get('sf_schema','')
     )
-    return resp.choices[0].message.content.strip()
 
-# Load files as Polars DataFrame
-
-def load_file(f) -> pl.DataFrame:
-    ext=f.name.split('.')[-1].lower()
+def load_file(uploader_file):
+    ext = uploader_file.name.split('.')[-1].lower()
     try:
-        if ext=='csv': df=pl.read_csv(f)
-        elif ext=='xls': pdf=pd.read_excel(f,engine='xlrd'); df=pl.from_pandas(pdf)
-        elif ext=='xlsx': pdf=pd.read_excel(f,engine='openpyxl'); df=pl.from_pandas(pdf)
-        elif ext=='parquet': df=pl.read_parquet(f)
-        elif ext=='json': df=pl.read_json(f)
-        else: return None
-        return sanitize_cols(df)
+        if ext == 'csv':
+            return pd.read_csv(uploader_file)
+        if ext in ['xls', 'xlsx']:
+            return pd.read_excel(uploader_file, sheet_name=None)
+        if ext == 'parquet':
+            return pd.read_parquet(uploader_file)
+        if ext == 'json':
+            return pd.read_json(uploader_file)
+        if ext == 'csv': return pd.read_csv(uploader_file)
+        if ext in ['xls','xlsx']: return pd.read_excel(uploader_file, sheet_name=None)
+        if ext == 'parquet': return pd.read_parquet(uploader_file)
+        if ext == 'json': return pd.read_json(uploader_file)
     except Exception as e:
-        st.error(f"Failed to load {f.name}: {e}")
-        return None
+        st.error(f"Failed to load {uploader_file.name}: {e}")
+    return None
+
+
+def apply_steps(df):
+    # snapshot version
+    # Snapshot current before transformations
+    ts = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
+    st.session_state.versions.append((ts, df.copy()))
+    for step in st.session_state.steps:
+        t = step['type']
+        if t == 'rename':
+            df = df.rename(columns={step['old']: step['new']})
+        elif t == 'filter' and step.get('expr'):
+            try: df = df.query(step['expr'])
+            except: pass
+        elif t == 'compute' and step.get('expr'):
+            expr = step['expr']
+            if expr.lower().startswith('sql:'):
+                try: df = sqldf(expr[4:], {'df': df})
+                except: pass
+            else:
+                try: df[step['new']] = df.eval(expr)
+                except: pass
+        elif t == 'drop_const':
+            df = df.loc[:, df.nunique() > 1]
+        elif t == 'onehot':
+            df = pd.get_dummies(df, columns=step['cols'])
+        elif t == 'join':
+            aux = st.session_state.datasets.get(step['aux'])
+            if aux is not None:
+                df = df.merge(aux,
+                              left_on=step['left'],
+                              right_on=step['right'],
+                              how=step['how'])
+        elif t == 'impute':
+            for c in df.columns:
+                if df[c].isna().any():
+                    df[c] = df[c].fillna(
+                        df[c].median() if pd.api.types.is_numeric_dtype(df[c])
+                        else df[c].mode().iloc[0]
+                        df[c].median() if pd.api.types.is_numeric_dtype(df[c]) else df[c].mode().iloc[0]
+                    )
+    return df
 
 # --- UI Tabs ---
-tabs=st.tabs(['Datasets','Transform','Profile','Export','Graph','Snowflake','AI Query'])
+tabs = st.tabs([
+    "📂 Datasets",
+    "✏️ Transform",
+    "📈 Profile",
+    "💡 Insights",
+    "⬇️ Export",
+    "🕒 History",
+    "⚙️ Snowflake",
+    "📜 Pipeline",
+    "🕸️ Social Graph"
+])
 
-# 1) Datasets
+# --- 1. Datasets ---
+# 1. Datasets
 with tabs[0]:
-    st.header('1. Datasets')
-    files=st.file_uploader('Upload CSV/XLS/JSON/Parquet',accept_multiple_files=True)
+    st.header("1. Datasets")
+    files = st.file_uploader(
+        "Upload files (CSV/Excel/Parquet/JSON)",
+        type=['csv','xls','xlsx','parquet','json'],
+        accept_multiple_files=True
+    )
+    st.subheader("1. Load Data")
+    files = st.file_uploader("Upload files (CSV, Excel, Parquet, JSON)",
+                             type=['csv','xls','xlsx','parquet','json'],
+                             accept_multiple_files=True)
     if files:
-        for f in files:
-            df=load_file(f)
-            if df is not None: st.session_state.datasets[f.name]=df
-        st.success('Loaded datasets')
+        for u in files:
+            data = load_file(u)
+            if isinstance(data, dict):
+                for sheet, sdf in data.items():
+                    st.session_state.datasets[f"{u.name}:{sheet}"] = sdf
+            elif data is not None:
+                st.session_state.datasets[u.name] = data
+        st.success("Files loaded into session.")
+        st.success(f"Loaded {len(files)} files.")
     if st.session_state.datasets:
-        key=st.selectbox('Select dataset',list(st.session_state.datasets.keys()))
-        st.session_state.current=key
-        df=st.session_state.datasets[key]
-        gb=GridOptionsBuilder.from_dataframe(df.to_pandas())
-        gb.configure_pagination(); gb.configure_side_bar()
-        AgGrid(df.to_pandas(),gridOptions=gb.build(),enable_enterprise_modules=False)
+        sel = st.selectbox("Select dataset", list(st.session_state.datasets.keys()), key='sel_dataset')
+        sel = st.selectbox("Select dataset", list(st.session_state.datasets.keys()), key='sel')
+        st.session_state.current = sel
+        st.data_editor(
+            st.session_state.datasets[sel],
+            key=f"editor_{sel}",
+            use_container_width=True
+        )
+        st.data_editor(st.session_state.datasets[sel], key=f"editor_{sel}", use_container_width=True)
 
-# 2) Transform
+# --- 2. Transform ---
+# 2. Transform
 with tabs[1]:
-    st.header('2. Transform')
-    key=st.session_state.current
-    if not key: st.info('Upload and select a dataset')
-    else:
-        df_pl=st.session_state.datasets[key]
-        st.subheader('Preview Before')
-        AgGrid(df_pl.to_pandas(),enable_enterprise_modules=False)
-        op=st.selectbox('Operation',['Polars Compute','Dask Filter','SQL Execute','Drop Const','One-Hot','Impute'])
-        # Polars Compute
-        if op=='Polars Compute':
-            newc=st.text_input('New column'); logic=st.text_area('Logic (English)')
-            manual=st.text_input('Manual Polars expr (pl.col(...))')
-            if st.button('Generate Expr'): prompt=f"Given DataFrame df columns {list(df_pl.columns)} and logic '{logic}', generate Polars expr."; expr=ai_generate_code(prompt); st.code(expr)
-            expr=manual or locals().get('expr','')
-            if expr and st.button('Apply Polars Compute'):
-                try: series=eval(expr,{'pl':pl}); df_new=df_pl.with_columns(series.alias(newc)); st.session_state.datasets[key]=df_new; st.experimental_rerun()
-                except Exception as e: st.error(f'Error: {e}')
-        # Dask Filter
-        if op=='Dask Filter':
-            logic=st.text_area('Filter logic (English)'); manual=st.text_input('Manual Dask expr')
-            if st.button('Generate Filter'): prompt=f"Given df columns {list(df_pl.columns)} and logic '{logic}', generate Dask filter expr."; expr=ai_generate_code(prompt); st.code(expr)
-            expr=manual or locals().get('expr','')
-            if expr and st.button('Apply Dask Filter'):
-                try:
-                    df_dd=dd.from_pandas(df_pl.to_pandas(),npartitions=2)
-                    df_f=df_dd.query(expr).compute()
-                except:
-                    df_f=df_pl.to_pandas().query(expr)
-                df_new=pl.from_pandas(df_f); st.session_state.datasets[key]=df_new; st.experimental_rerun()
-
-        # SQL Execute
-        if op=='SQL Execute':
-            newc=st.text_input('New column (SQL)'); logic=st.text_area('Logic (English SQL)'); manual=st.text_area('Manual SQL')
-            if st.button('Generate SQL'): prompt=f"Table df columns {list(df_pl.columns)}. Write SQL to compute {newc} as {logic}. Return only query."; sql=ai_generate_code(prompt); st.code(sql)
-            sql=manual or locals().get('sql','')
-            if sql and st.button('Apply SQL'):
-                try: engine=create_engine('sqlite:///:memory:'); pdf=df_pl.to_pandas(); pdf.to_sql('df',engine,index=False); df_sql=pd.read_sql(sql,engine); df_new=pl.from_pandas(df_sql); st.session_state.datasets[key]=df_new; st.experimental_rerun()
-                except Exception as e: st.error(f'SQL err: {e}')
-
-        # Drop Const
-        if op=='Drop Const' and st.button('Drop Const'): df_new=df_pl.select(pl.exclude(pl.all().filter(lambda s: df_pl[n:=s.name].n_unique()<=1))); st.session_state.datasets[key]=df_new; st.experimental_rerun()
-        # One-Hot
-        if op=='One-Hot' and st.button('One-Hot'): df_new=pl.from_pandas(pd.get_dummies(df_pl.to_pandas())); st.session_state.datasets[key]=df_new; st.experimental_rerun()
-        # Impute
-        if op=='Impute' and st.button('Impute'): df_new=df_pl.fill_null(strategy='median'); st.session_state.datasets[key]=df_new; st.experimental_rerun()
-
-# 3) Profile
-with tabs[2]:
-    st.header('3. Profile')
-    key=st.session_state.current
-    if key: st.dataframe(st.session_state.datasets[key].describe().to_pandas())
-
-# 4) Export
-with tabs[3]:
-    st.header('4. Export')
-    key=st.session_state.current
-    if key:
-        df_pl=st.session_state.datasets[key]
-        fmt=st.selectbox('Format',['CSV','Parquet','JSON'],key='exp_fmt')
-        if st.button('Download'):
-            if fmt=='CSV': st.download_button('CSV',df_pl.write_csv(),'data.csv')
-            elif fmt=='Parquet': st.download_button('Parquet',df_pl.write_parquet(),'data.parquet')
-            else: st.download_button('JSON',df_pl.write_json(),'data.json')
-
-# 5) Graph
-with tabs[4]:
-    st.header('5. Graph')
-    key=st.session_state.current
-    if key:
-        pdf=st.session_state.datasets[key].to_pandas()
-        src=st.selectbox('Source',pdf.columns,key='g_src')
-        tgt=st.selectbox('Target',pdf.columns,key='g_tgt')
-        weight=st.selectbox('Edge weight',[None]+pdf.select_dtypes('number').columns.tolist(),key='g_w')
-        top_n=st.number_input('Top N edges',value=5,min_value=1,key='g_top')
-        G=nx.Graph()
-        for _,r in pdf.iterrows(): u,v=r[src],r[tgt]; w=float(r[weight]) if weight and not np.isnan(r[weight]) else 1.0; G.add_edge(u,v,weight=G.get_edge_data(u,v,{'weight':0})['weight']+w)
-        edges=sorted(G.edges(data=True),key=lambda x:x[2]['weight'],reverse=True);
-        top_set={(u,v) for u,v,_ in edges[:top_n]}
-        pos=nx.random_layout(G)
-        traces=[]
-        for u,v,data in G.edges(data=True):
-            x0,y0=pos[u]; x1,y1=pos[v]
-            color='red' if (u,v) in top_set or (v,u) in top_set else 'gray'
-            width=3 if (u,v) in top_set or (v,u) in top_set else 1
-            traces.append(go.Scatter(x=[x0,x1,None],y=[y0,y1,None],mode='lines',line=dict(width=width,color=color),hovertext=f"{u}-{v}: {data['weight']}",hoverinfo='text'))
-        node_trace=go.Scatter(x=[pos[n][0] for n in G.nodes()],y=[pos[n][1] for n in G.nodes()],mode='markers+text',text=list(G.nodes()),textposition='top center',marker=dict(size=10,color='skyblue'))
-        fig=go.Figure(data=traces+[node_trace]); fig.update_layout(xaxis=dict(showgrid=False,zeroline=False),yaxis=dict(showgrid=False,zeroline=False),showlegend=False)
-        st.plotly_chart(fig,use_container_width=True)
-
-# 6) Snowflake
-with tabs[5]:
-    st.header('6. Snowflake')
-    key=st.session_state.current
-    acc=st.text_input('Account');usr=st.text_input('User');pwd=st.text_input('Password',type='password')
-    wh=st.text_input('Warehouse');db=st.text_input('Database');sc=st.text_input('Schema');tbl=st.text_input('Table')
-    if st.button('Write') and key:
-        df_pl=st.session_state.datasets[key]
-        conn=snowflake.connector.connect(user=usr,password=pwd,account=acc,warehouse=wh,database=db,schema=sc)
-        write_pandas(conn,df_pl.to_pandas(),tbl);conn.close();st.success(f'Written to {tbl}')
-
-# 7) AI Supercharged Suite
-with tabs[6]:
-    st.header('7. AI Supercharged Suite')
+    st.header("2. Transform")
+    st.subheader("2. Transform Data")
     key = st.session_state.current
+    if key:
     if not key:
-        st.info('Select a dataset first')
+        st.info("Please load a dataset first.")
     else:
-        df_pl = st.session_state.datasets[key]
-        pdf = df_pl.to_pandas()
+        df = st.session_state.datasets[key]
+        for i, step in enumerate(st.session_state.steps):
+            st.write(f"{i+1}. {step['type']} — {step.get('desc','')}")
+        op = st.selectbox(
+            "Operation",
+            ['rename','filter','compute','drop_const','onehot','join','impute'],
+            key='op'
+        )
+        for i, s in enumerate(st.session_state.steps):
+            st.markdown(f"**Step {i+1}:** {s['type']} — {s.get('desc','')} ")
+        st.markdown("---")
+        op = st.selectbox("Operation", ['rename','filter','compute','drop_const','onehot','join','impute'], key='op')
+        if op == 'rename':
+            old = st.selectbox("Old column", df.columns)
+            old = st.selectbox("Old column name", df.columns)
+            new = st.text_input("New column name")
+            if st.button("Add Rename"): 
+                st.session_state.steps.append({'type':'rename','old':old,'new':new,'desc':f"Rename {old}→{new}"})
+            if st.button("Add Rename"): st.session_state.steps.append({'type':'rename','old':old,'new':new,'desc':f"Rename {old}→{new}"})
+        elif op == 'filter':
+            expr = st.text_input("Filter expression")
+            if st.button("Add Filter"): 
+                st.session_state.steps.append({'type':'filter','expr':expr,'desc':expr})
+            expr = st.text_input("Filter expression (pandas query)")
+            if st.button("Add Filter"): st.session_state.steps.append({'type':'filter','expr':expr,'desc':expr})
+        elif op == 'compute':
+            newc = st.text_input("New column name")
+            st.write("Columns:", df.columns.tolist())
+            st.write("Functions: np.log(), np.sqrt(); prefix SQL:")
+            expr2 = st.text_input("Formula or SQL:")
+            if st.button("Add Compute"): 
+                st.session_state.steps.append({'type':'compute','new':newc,'expr':expr2,'desc':newc})
+            newc = st.text_input("New column name for compute")
+            expr2 = st.text_input("Formula or SQL (prefix SQL:)")
+            st.write("**Columns:**", list(df.columns))
+            st.write("**Common functions:** np.log(), np.sqrt(), etc.")
+            if st.button("Add Compute"): st.session_state.steps.append({'type':'compute','new':newc,'expr':expr2,'desc':f"Compute {newc}"})
+        elif op == 'drop_const':
+            if st.button("Add Drop Constants"): 
+                st.session_state.steps.append({'type':'drop_const','desc':'Drop constants'})
+            if st.button("Drop Constant Columns"): st.session_state.steps.append({'type':'drop_const','desc':'Drop constant columns'})
+        elif op == 'onehot':
+            cols = st.multiselect("Columns to encode", df.select_dtypes('object').columns)
+            if st.button("Add One-Hot"): 
+                st.session_state.steps.append({'type':'onehot','cols':cols,'desc':','.join(cols)})
+            cols = st.multiselect("Columns to one-hot encode", df.select_dtypes('object').columns)
+            if st.button("Add One-Hot"): st.session_state.steps.append({'type':'onehot','cols':cols,'desc':f"One-hot {cols}"})
+        elif op == 'join':
+            aux = st.selectbox("Aux dataset", [k for k in st.session_state.datasets if k != key])
+            aux = st.selectbox("Auxiliary dataset to join", [k for k in st.session_state.datasets if k!=key])
+            left = st.selectbox("Left key", df.columns)
+            right = st.selectbox("Right key", st.session_state.datasets[aux].columns)
+            how = st.selectbox("Join type", ['inner','left','right','outer'])
+            if st.button("Add Join"): 
+                st.session_state.steps.append({'type':'join','aux':aux,'left':left,'right':right,'how':how,'desc':aux})
+            if st.button("Add Join"): st.session_state.steps.append({'type':'join','aux':aux,'left':left,'right':right,'how':how,'desc':f"Join {aux}"})
+        elif op == 'impute':
+            if st.button("Add Impute"): 
+                st.session_state.steps.append({'type':'impute','desc':'Auto-impute'})
+            if st.button("Auto Impute Missing"): st.session_state.steps.append({'type':'impute','desc':'Auto-impute missing'})
+        if st.button("Apply Transformations"): 
+            st.session_state.datasets[key] = apply_steps(df)
+            st.success("Transformations applied.")
+        st.data_editor(
+            st.session_state.datasets[key],
+            key=f"transformed_{key}",
+            use_container_width=True
+        )
+        st.data_editor(st.session_state.datasets[key], key=f"transformed_{key}", use_container_width=True)
 
-        # A) Narrative Insights
-        st.subheader('A) Narrative Insights')
-        nlq = st.text_area('Ask a natural language question')
-        if st.button('Generate Narrative'):
-            prompt = (
-                f"You are a data storyteller. Columns: {list(df_pl.columns)}. "
-                f"Sample: {pdf.head(5).to_dict(orient='records')}. "
-                f"Question: '{nlq}'. Provide concise markdown narrative."
-            )
-            narrative = ai_generate_code(prompt)
-            st.markdown(narrative)
+# --- 3. Profile ---
+# 3. Profile
+with tabs[2]:
+    st.header("3. Profile")
+    st.subheader("3. Data Profile")
+    key = st.session_state.current
+    if key:
+        df = st.session_state.datasets[key]
+        stats = pd.DataFrame({
+        profile = pd.DataFrame({
+            'dtype': df.dtypes,
+            'nulls': df.isna().sum(),
+            'null_pct': df.isna().mean()*100
+        })
+        st.dataframe(stats, use_container_width=True)
+        st.dataframe(profile, use_container_width=True)
 
-        # B) Counterfactual Explorer
-        st.subheader('B) Counterfactual Explorer')
-        from sklearn.tree import DecisionTreeClassifier
-        num = pdf.select_dtypes(include=[np.number])
-        if len(num.columns) >= 2:
-            target = st.selectbox('Binary target', [c for c in num.columns if pdf[c].nunique()==2], key='cf_target')
-            feats = st.multiselect('Features', [c for c in num.columns if c!=target], key='cf_feats')
-            if st.button('Explore Counterfactual'):
-                model = DecisionTreeClassifier(max_depth=3).fit(pdf[feats], pdf[target])
-                inst = pdf[feats].iloc[[0]]
-                base = model.predict(inst)[0]
-                st.write(f"Base pred: {base}")
-                for col in feats:
-                    for d in [-1,1]:
-                        tmp = inst.copy(); tmp[col] += d*pdf[col].std()
-                        if model.predict(tmp)[0] != base:
-                            st.markdown(f"Change **{col}** by {d*pdf[col].std():.2f} flips prediction.")
-                            break
+# --- 4. Insights ---
+# 4. Insights
+with tabs[3]:
+    st.header("4. Insights")
+    st.subheader("4. Auto Insights")
+    key = st.session_state.current
+    if key:
+        df = st.session_state.datasets[key]
+        num = df.select_dtypes('number')
+        if not num.empty:
+            st.plotly_chart(px.imshow(num.corr(), text_auto=True), use_container_width=True)
 
-        # C) Anomaly Detection
-        st.subheader('C) Anomaly Detection')
-        from sklearn.ensemble import IsolationForest
-        num_cols = pdf.select_dtypes(include=[np.number]).columns.tolist()
-        contam = st.slider('Contamination rate', 0.01, 0.2, 0.05, key='an_cont')
-        if st.button('Run Anomaly Detection') and num_cols:
-            iso = IsolationForest(contamination=contam, random_state=42)
-            preds = iso.fit_predict(pdf[num_cols])
-            pdf['anomaly'] = preds == -1
-            st.dataframe(pdf[pdf['anomaly']])
-            fig = px.scatter_matrix(pdf.sample(min(100, len(pdf))), dimensions=num_cols, color='anomaly')
-            st.plotly_chart(fig, use_container_width=True)
+# --- 5. Export ---
+# 5. Export
+with tabs[4]:
+    st.header("5. Export")
+    st.subheader("5. Export & Writeback")
+    key = st.session_state.current
+    if key:
+        df = st.session_state.datasets[key]
+        fmt = st.selectbox("Format", ['CSV','JSON','Parquet','Excel','Snowflake'], key='fmt')
+        if st.button("Export"):  
+            if fmt == 'CSV':
+                st.download_button("Download CSV", df.to_csv(index=False).encode(), "data.csv")
+            elif fmt == 'JSON':
+                st.download_button("Download JSON", df.to_json(orient='records'), "data.json")
+            elif fmt == 'Parquet':
+                st.download_button("Download Parquet", df.to_parquet(index=False), "data.parquet")
+            elif fmt == 'Excel':
+                out = BytesIO()
+                df.to_excel(out, index=False, engine='openpyxl')
+                st.download_button("Download Excel", out.getvalue(), "data.xlsx")
+        fmt = st.selectbox("Export format", ['CSV','JSON','Parquet','Excel','Snowflake'], key='fmt')
+        if st.button("Export Now"):
+            if fmt=='CSV': st.download_button("Download CSV", df.to_csv(index=False).encode(), "data.csv")
+            elif fmt=='JSON': st.download_button("Download JSON", df.to_json(orient='records'), "data.json")
+            elif fmt=='Parquet': st.download_button("Download Parquet", df.to_parquet(index=False), "data.parquet")
+            elif fmt=='Excel': 
+                out=BytesIO(); df.to_excel(out,index=False,engine='openpyxl'); st.download_button("Download Excel", out.getvalue(), "data.xlsx")
+            else:
+                # auto-create table in Snowflake
+                table_name = st.session_state.current.replace(':', '_')
+                # auto-create and load Snowflake table
+                table_name = st.session_state.current.replace(':','_')
+                conn = get_sf_conn()
+                write_pandas(conn, df, table_name)
+                conn.close()
+                st.success(f"Table '{table_name}' created and data loaded to Snowflake.")
+                cur = conn.cursor()
+                # create table DDL
+                cols_defs=[]
+                for c,dtype in df.dtypes.items():
+                    if pd.api.types.is_integer_dtype(dtype): cols_defs.append(f'"{c}" NUMBER')
+                    elif pd.api.types.is_float_dtype(dtype): cols_defs.append(f'"{c}" FLOAT')
+                    elif pd.api.types.is_datetime64_dtype(dtype): cols_defs.append(f'"{c}" TIMESTAMP_NTZ')
+                    else: cols_defs.append(f'"{c}" VARCHAR({int(df[c].astype(str).map(len).max() or 1)})')
+                ddl=f"CREATE TABLE IF NOT EXISTS {table_name} ({', '.join(cols_defs)})"
+                try: cur.execute(ddl)
+                except Exception as e: st.error(f"DDL failed: {e}")
+                try: write_pandas(conn,df,table_name); st.success(f"Loaded to Snowflake table {table_name}")
+                except Exception as e: st.error(f"Write failed: {e}")
+                cur.close(); conn.close()
 
-        # D) Clustering Explorer
-        st.subheader('D) Clustering Explorer')
-        from sklearn.cluster import KMeans
-        k = st.number_input('Number of clusters', 2, 10, 3, key='clust_k')
-        feats2 = st.multiselect('Cluster on', num_cols, default=num_cols[:2], key='clust_feats')
-        if st.button('Run Clustering') and len(feats2)>=2:
-            km = KMeans(n_clusters=k, random_state=42).fit(pdf[feats2])
-            pdf['cluster'] = km.labels_
-            fig = px.scatter(pdf, x=feats2[0], y=feats2[1], color='cluster', symbol='cluster')
-            st.plotly_chart(fig, use_container_width=True)
+# --- 6. History ---
+# 6. History
+with tabs[5]:
+    st.header("6. History")
+    st.subheader("6. Transformation History")
+    if st.session_state.versions:
+        for idx,(ts,snap) in enumerate(st.session_state.versions):
+            cols = st.columns([0.7,0.3])
+            cols[0].write(f"{idx+1}. {ts}")
+            if cols[1].button("Revert", key=f"hist_{idx}"):
+                st.session_state.datasets[st.session_state.current] = snap
+                st.experimental_rerun()
+        for i,(ts,snap) in enumerate(st.session_state.versions):
+            cols=st.columns([0.7,0.3])
+            cols[0].write(f"{i+1}. {ts}")
+            if cols[1].button("Revert", key=f"rev{i}"): st.session_state.datasets[st.session_state.current]=snap; st.experimental_rerun()
 
-        # E) Similarity Search
-        st.subheader('E) Similarity Search')
-        text_cols = pdf.select_dtypes(include=[object]).columns.tolist()
-        if text_cols:
-            col = st.selectbox('Text column', text_cols, key='sim_col')
-            query = st.text_input('Search query', key='sim_q')
-            if st.button('Run Similarity') and query:
-                resp = client.embeddings.create(model='text-embedding-ada-002', input=[query]+pdf[col].astype(str).tolist())
-                query_emb = np.array(resp.data[0].embedding)
-                embs = np.array([d.embedding for d in resp.data[1:]])
-                sims = (embs @ query_emb)/(np.linalg.norm(embs,axis=1)*np.linalg.norm(query_emb))
-                pdf['similarity'] = sims
-                topn = pdf.nlargest(5,'similarity')[[col,'similarity']]
-                st.table(topn)
+# --- 7. Snowflake Settings ---
+# 7. Snowflake Settings
+with tabs[6]:
+    st.header("7. Snowflake Settings")
+    st.subheader("7. Snowflake Configuration")
+    st.text_input("Account", key='sf_account')
+    st.text_input("User", key='sf_user')
+    st.text_input("Username", key='sf_user')
+    st.text_input("Password", type='password', key='sf_password')
+    st.text_input("Warehouse", key='sf_warehouse')
+    st.text_input("Database", key='sf_database')
+    st.text_input("Schema", key='sf_schema')
 
-        # F) Automated Email Summary
-        st.subheader('F) Automated Email Summary')
-        email = st.text_input('Recipient email')
-        time = st.time_input('Send time')
-        if st.button('Schedule Daily Summary'):
-            schedule = f"""BEGIN:VEVENT
-RRULE:FREQ=DAILY;BYHOUR={time.hour};BYMINUTE={time.minute};BYSECOND=0
-END:VEVENT"""
-            summary_prompt = (
-                f"Summarize dataset shape {pdf.shape} and variables {list(df_pl.columns)} in 3 bullet points."
-            )
-            st.session_state['auto_email'] = (email, summary_prompt, schedule)
-            st.success('Scheduled daily email summary.')
+# --- 8. Pipeline YAML ---
+# 8. Pipeline YAML
+with tabs[7]:
+    st.header("8. Pipeline Configuration YAML")
+    yaml_str = yaml.dump({'pipeline_steps': st.session_state.steps}, sort_keys=False)
+    st.text_area("Pipeline YAML", yaml_str, height=300)
+    st.download_button("Download YAML", yaml_str, "pipeline.yaml")
+    st.subheader("8. Pipeline as YAML")
+    yaml_str=yaml.dump({'pipeline_steps':st.session_state.steps},sort_keys=False)
+    st.text_area("YAML",yaml_str,height=300)
+    st.download_button("Download YAML",yaml_str,"pipeline.yaml")
 
-        # G) Dashboard Designer
-        st.subheader('G) Generative Dashboard Designer')
-        dash_q = st.text_area('Describe dashboard layout (e.g. trends, breakdowns, correlations)')
-        if st.button('Generate Dashboard'):
-            prompt = (
-                f"You are a Python visualization wizard. DataFrame df columns: {list(df_pl.columns)}. "
-                f"Sample: {pdf.head(5).to_dict(orient='records')}. "
-                f"Generate a Plotly Express dashboard with subplots as described: '{dash_q}'. Return only functional Python code."
-            )
-            code = ai_generate_code(prompt)
-            st.code(code)
-            local_vars = {'df': pdf, 'px': px, 'go': go}
-            try:
-                exec(code, {}, local_vars)
-            except Exception as e:
-                st.error(f"Dashboard execution failed: {e}")
+# --- 9. Social Graph ---
+# 9. Social Graph
+with tabs[8]:
+    st.header("9. Social Network Graph")
+    key = st.session_state.current
+    st.subheader("9. Social Network Graph")
+    key=st.session_state.current
+    if key:
+        df = st.session_state.datasets[key]
+        cols = list(df.columns)
+        src = st.selectbox("Source column", cols, key='src_col')
+        tgt = st.selectbox("Target column", cols, key='tgt_col')
+        wt_opt = [None] + cols
+        wt = st.selectbox("Weight column (optional)", wt_opt, key='wt_col')
+        df=st.session_state.datasets[key]
+        cols=list(df.columns)
+        src=st.selectbox("Source column",cols,key='src')
+        tgt=st.selectbox("Target column",cols,key='tgt')
+        wt_opt=[None]+cols
+        wt=st.selectbox("Weight column",wt_opt,key='wt')
+        if st.button("Generate Graph"):
+            G = nx.Graph()
+            for _, row in df.iterrows():
+                u, v = row[src], row[tgt]
+                w = float(row[wt]) if wt and pd.notna(row[wt]) else 1.0
+                if G.has_edge(u, v): G[u][v]['weight'] += w
+                else: G.add_edge(u, v, weight=w)
+            edges_sorted = sorted(G.edges(data=True), key=lambda x: x[2]['weight'], reverse=True)
+            top5 = {(u, v) for u, v, d in edges_sorted[:5]}
+            net = Network(height="700px", width="100%", bgcolor="#222222", font_color="white")
+            net.barnes_hut(gravity=-20000, central_gravity=0.3, spring_length=100, spring_strength=0.001)
+            for n in G.nodes(): net.add_node(n, label=str(n), title=f"Degree: {G.degree(n)}", value=G.degree(n))
+            for u, v, data in G.edges(data=True):
+                if (u, v) in top5 or (v, u) in top5:
+                    net.add_edge(u, v, value=data['weight'], width=4, color='red', title=f"Weight: {data['weight']}\nCategory: {row.get('category','')}\nSubcategory: {row.get('subcategory','')}")
+            G=nx.Graph()
+            for _,r in df.iterrows():
+                u,v=r[src],r[tgt]
+                w=float(r[wt]) if wt and pd.notna(r[wt]) else 1
+                if G.has_edge(u,v):G[u][v]['weight']+=w
+                else:G.add_edge(u,v,weight=w)
+            edges=sorted(G.edges(data=True),key=lambda x:x[2]['weight'],reverse=True)
+            top5={(u,v)for u,v,_ in edges[:5]}
+            net=Network(height='700px',width='100%',bgcolor='#222222',font_color='white')
+            net.barnes_hut(gravity=-20000,central_gravity=0.3,spring_length=100,spring_strength=0.001)
+            for n in G.nodes():net.add_node(n,label=str(n),title=f'Degree:{G.degree(n)}',value=G.degree(n))
+            for u,v,d in G.edges(data=True):
+                if (u,v) in top5 or (v,u) in top5:
+                    net.add_edge(u,v,value=d['weight'],width=4,color='red',title=f"Weight:{d['weight']}")
+                else:
+                    net.add_edge(u, v, value=data['weight'], width=1, color='rgba(200,200,200,0.2)', title=f"Weight: {data['weight']}")
+                    net.add_edge(u,v,value=d['weight'],width=1,color='rgba(200,200,200,0.2)',title=f"Weight:{d['weight']}")
+            net.show_buttons(filter_=['physics'])
+            html = net.generate_html()
+            import streamlit.components.v1 as components
+            components.html(html, height=750, scrolling=True)
+            html=net.generate_html()
+            import streamlit.components.v1 as comp; comp.html(html,height=750,scrolling=True)
