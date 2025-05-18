@@ -10,7 +10,6 @@ from snowflake.connector.pandas_tools import write_pandas
 from openai import OpenAI
 from sqlalchemy import create_engine
 import dask.dataframe as dd
-# Correct AgGrid import
 from st_aggrid import AgGrid, GridOptionsBuilder
 import networkx as nx
 import plotly.graph_objects as go
@@ -41,28 +40,28 @@ def sanitize_cols(pl_df: pl.DataFrame) -> pl.DataFrame:
 @st.cache_data
 def ai_polars_expr(newcol, logic, sample: pl.DataFrame) -> str:
     prompt = (
-        f"You are a Polars data engineer. Given sample rows {sample.to_dicts()} and logic: '{logic}', "
-        f"generate a Polars expression to create a new column '{newcol}'. Return only the expression."
+        f"You are a Polars data engineer. Given sample rows {sample.to_dicts()} and logic: '{logic}',"
+        f" generate a Polars expression to create a new column '{newcol}'. Return only the expression."
     )
-    resp = client.chat.completions.create(model='gpt-4o-mini',messages=[{'role':'user','content':prompt}])
+    resp = client.chat.completions.create(model='gpt-4o-mini', messages=[{'role':'user','content':prompt}])
     return resp.choices[0].message.content.strip().strip('`')
 
 @st.cache_data
 def ai_dask_query(logic, columns):
     prompt = (
-        f"You are a Dask data engineer. Given columns {columns} and logic: '{logic}', "
-        "generate a Dask dataframe filter expression. Return only the expression."
+        f"You are a Dask data engineer. Given columns {columns} and logic: '{logic}',"
+        " generate a Dask dataframe filter expression. Return only the expression."
     )
-    resp = client.chat.completions.create(model='gpt-4o-mini',messages=[{'role':'user','content':prompt}])
+    resp = client.chat.completions.create(model='gpt-4o-mini', messages=[{'role':'user','content':prompt}])
     return resp.choices[0].message.content.strip().strip('`')
 
 @st.cache_data
 def ai_sql_query(newcol, logic):
     prompt = (
-        f"You are a SQL expert using SQLite. Table is named 'df'. Write a SELECT *, "
-        f"{logic} AS {newcol} FROM df; Return only the SQL query."
+        f"You are a SQL expert using SQLite. Table is named 'df'. Write a SELECT *,"
+        f" {logic} AS {newcol} FROM df; Return only the SQL query."
     )
-    resp = client.chat.completions.create(model='gpt-4o-mini',messages=[{'role':'user','content':prompt}])
+    resp = client.chat.completions.create(model='gpt-4o-mini', messages=[{'role':'user','content':prompt}])
     return normalize_sql(resp.choices[0].message.content.strip().strip('`'))
 
 def normalize_sql(sql: str) -> str:
@@ -86,11 +85,18 @@ def normalize_sql(sql: str) -> str:
 def load_file(f) -> pl.DataFrame:
     ext = f.name.split('.')[-1].lower()
     try:
-        if ext=='csv': df = pl.read_csv(f)
-        elif ext in ('xls','xlsx'): df = pl.read_excel(f)
-        elif ext=='parquet': df = pl.read_parquet(f)
-        elif ext=='json': df = pl.read_json(f)
-        else: return None
+        if ext == 'csv':
+            df = pl.read_csv(f)
+        elif ext in ('xls', 'xlsx'):
+            # Use pandas + openpyxl to avoid fastexcel requirement
+            pdf = pd.read_excel(f, engine='openpyxl')
+            df = pl.from_pandas(pdf)
+        elif ext == 'parquet':
+            df = pl.read_parquet(f)
+        elif ext == 'json':
+            df = pl.read_json(f)
+        else:
+            return None
         return sanitize_cols(df)
     except Exception as e:
         st.error(f"Failed to load {f.name}: {e}")
@@ -112,10 +118,10 @@ with tabs[0]:
     if st.session_state.datasets:
         key = st.selectbox('Select dataset', list(st.session_state.datasets.keys()))
         st.session_state.current = key
-        df = st.session_state.datasets[key]
-        gb = GridOptionsBuilder.from_dataframe(df.to_pandas())
+        df_pl = st.session_state.datasets[key]
+        gb = GridOptionsBuilder.from_dataframe(df_pl.to_pandas())
         gb.configure_pagination(); gb.configure_side_bar()
-        AgGrid(df.to_pandas(), gridOptions=gb.build(), enable_enterprise_modules=False)
+        AgGrid(df_pl.to_pandas(), gridOptions=gb.build(), enable_enterprise_modules=False)
 
 # 2) Transform
 with tabs[1]:
@@ -130,7 +136,7 @@ with tabs[1]:
         op = st.selectbox('Operation', ['Polars Compute','Dask Filter','SQL Execute','Drop Const','One-Hot','Impute'])
 
         # Polars Compute
-        if op=='Polars Compute':
+        if op == 'Polars Compute':
             newcol = st.text_input('New column name')
             logic = st.text_area('Logic (English)')
             manual = st.text_input('Or manual Polars expression')
@@ -148,7 +154,7 @@ with tabs[1]:
                     st.error(f'Polars compute failed: {e}')
 
         # Dask Filter
-        if op=='Dask Filter':
+        if op == 'Dask Filter':
             logic = st.text_area('Filter logic (English)')
             manual = st.text_input('Or manual Dask expression')
             if st.button('Generate Filter'):
@@ -167,7 +173,7 @@ with tabs[1]:
                     st.error(f'Dask filter failed: {e}')
 
         # SQL Execute
-        if op=='SQL Execute':
+        if op == 'SQL Execute':
             newcol = st.text_input('New column name (SQL)')
             logic = st.text_area('Logic (English for SQL)')
             manual = st.text_area('Or manual SQL (use table df)')
@@ -188,20 +194,20 @@ with tabs[1]:
                     st.error(f'SQL execution failed: {e}')
 
         # Drop constant columns
-        if op=='Drop Const' and st.button('Apply Drop Constants'):
+        if op == 'Drop Const' and st.button('Apply Drop Constants'):
             df_new = df_pl.select(pl.exclude(pl.all().filter(lambda s: df_pl[n := s.name].n_unique() <= 1)))
             st.session_state.datasets[key] = df_new
             st.experimental_rerun()
 
         # One-Hot Encode
-        if op=='One-Hot' and st.button('Apply One-Hot'):
+        if op == 'One-Hot' and st.button('Apply One-Hot'):
             df_new_pd = pd.get_dummies(df_pl.to_pandas())
             df_new = pl.from_pandas(df_new_pd)
             st.session_state.datasets[key] = df_new
             st.experimental_rerun()
 
         # Impute Missing
-        if op=='Impute' and st.button('Apply Impute'):
+        if op == 'Impute' and st.button('Apply Impute'):
             df_new = df_pl.fill_null(strategy='median')
             st.session_state.datasets[key] = df_new
             st.experimental_rerun()
@@ -223,10 +229,9 @@ with tabs[3]:
         df_pl = st.session_state.datasets[key]
         fmt = st.selectbox('Format', ['CSV','Parquet','JSON'], key='exp_fmt')
         if st.button('Download'):
-            buf = BytesIO()
-            if fmt=='CSV':
+            if fmt == 'CSV':
                 st.download_button('CSV', df_pl.write_csv(), 'data.csv')
-            elif fmt=='Parquet':
+            elif fmt == 'Parquet':
                 st.download_button('Parquet', df_pl.write_parquet(), 'data.parquet')
             else:
                 st.download_button('JSON', df_pl.write_json(), 'data.json')
