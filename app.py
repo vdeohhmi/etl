@@ -13,7 +13,6 @@ import dask.dataframe as dd
 from st_aggrid import AgGrid, GridOptionsBuilder
 import networkx as nx
 import plotly.graph_objects as go
-import plotly.express as px
 
 # --- App Configuration ---
 st.set_page_config(page_title="Data Wizard X Pro", layout="wide")
@@ -40,19 +39,25 @@ def sanitize_cols(pl_df: pl.DataFrame) -> pl.DataFrame:
 @st.cache_data
 def ai_polars_expr(newcol, logic, sample: pl.DataFrame) -> str:
     prompt = (
-        f"You are a Polars data engineer. Given sample rows {sample.to_dicts()} and logic: '{logic}',"
+        f"You are a Polars data engineer. Given sample rows {sample.to_dicts()} and logic '{logic}',"
         f" generate a Polars expression to create a new column '{newcol}'. Return only the expression."
     )
-    resp = client.chat.completions.create(model='gpt-4o-mini', messages=[{'role':'user','content':prompt}])
+    resp = client.chat.completions.create(
+        model='gpt-4o-mini',
+        messages=[{'role':'user','content':prompt}]
+    )
     return resp.choices[0].message.content.strip().strip('`')
 
 @st.cache_data
 def ai_dask_query(logic, columns):
     prompt = (
-        f"You are a Dask data engineer. Given columns {columns} and logic: '{logic}',"
+        f"You are a Dask data engineer. Given columns {columns} and logic '{logic}',"
         " generate a Dask dataframe filter expression. Return only the expression."
     )
-    resp = client.chat.completions.create(model='gpt-4o-mini', messages=[{'role':'user','content':prompt}])
+    resp = client.chat.completions.create(
+        model='gpt-4o-mini',
+        messages=[{'role':'user','content':prompt}]
+    )
     return resp.choices[0].message.content.strip().strip('`')
 
 @st.cache_data
@@ -61,7 +66,10 @@ def ai_sql_query(newcol, logic):
         f"You are a SQL expert using SQLite. Table is named 'df'. Write a SELECT *,"
         f" {logic} AS {newcol} FROM df; Return only the SQL query."
     )
-    resp = client.chat.completions.create(model='gpt-4o-mini', messages=[{'role':'user','content':prompt}])
+    resp = client.chat.completions.create(
+        model='gpt-4o-mini',
+        messages=[{'role':'user','content':prompt}]
+    )
     return normalize_sql(resp.choices[0].message.content.strip().strip('`'))
 
 def normalize_sql(sql: str) -> str:
@@ -88,13 +96,17 @@ def load_file(f) -> pl.DataFrame:
         if ext == 'csv':
             df = pl.read_csv(f)
         elif ext == 'xls':
-            # Use pandas + xlrd to read old Excel format
             pdf = pd.read_excel(f, engine='xlrd')
             df = pl.from_pandas(pdf)
         elif ext == 'xlsx':
-            # Use pandas + openpyxl to read newer Excel format
             pdf = pd.read_excel(f, engine='openpyxl')
             df = pl.from_pandas(pdf)
+        elif ext == 'parquet':
+            df = pl.read_parquet(f)
+        elif ext == 'json':
+            df = pl.read_json(f)
+        else:
+            return None
         return sanitize_cols(df)
     except Exception as e:
         st.error(f"Failed to load {f.name}: {e}")
@@ -183,7 +195,8 @@ with tabs[1]:
             if sql and st.button('Apply SQL'):
                 try:
                     engine = create_engine('sqlite:///:memory:')
-                    df_pl.to_pandas().to_sql('df', engine, index=False)
+                    pdf = df_pl.to_pandas()
+                    pdf.to_sql('df', engine, index=False)
                     df_sql = pd.read_sql(sql, engine)
                     df_new = pl.from_pandas(df_sql)
                     st.session_state.datasets[key] = df_new
@@ -243,7 +256,7 @@ with tabs[4]:
         src = st.selectbox('Source column', df_pd.columns, key='g_src')
         tgt = st.selectbox('Target column', df_pd.columns, key='g_tgt')
         G = nx.from_pandas_edgelist(df_pd, source=src, target=tgt)
-        pos = nx.spring_layout(G)
+        pos = nx.random_layout(G)
         edge_x, edge_y = [], []
         for u, v in G.edges():
             x0, y0 = pos[u]; x1, y1 = pos[v]
