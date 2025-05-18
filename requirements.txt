@@ -9,3 +9,4 @@ pyvis
 plotly
 openpyxl
 pyarrow
+xlrd>=2.0.1
