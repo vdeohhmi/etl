@@ -44,17 +44,19 @@ def get_sf_conn():
         schema=st.session_state.get('sf_schema','')
     )
 
+
 def load_file(uploader_file):
     ext = uploader_file.name.split('.')[-1].lower()
     try:
         if ext == 'csv':
             return pd.read_csv(uploader_file)
-        elif ext == 'xls':
-            # .xls support requires xlrd
-            return pd.read_excel(uploader_file, sheet_name=None, engine='xlrd')
-        elif ext == 'xlsx':
-            # .xlsx support via openpyxl
-            return pd.read_excel(uploader_file, sheet_name=None, engine='openpyxl')
+        elif ext in ('xls', 'xlsx'):
+            engine = 'xlrd' if ext == 'xls' else 'openpyxl'
+            sheets = pd.read_excel(uploader_file, sheet_name=None, engine=engine)
+            # return first sheet as DataFrame
+            if isinstance(sheets, dict) and sheets:
+                return next(iter(sheets.values()))
+            return sheets
         elif ext == 'parquet':
             return pd.read_parquet(uploader_file)
         elif ext == 'json':
@@ -99,9 +101,9 @@ with tabs[0]:
     )
     if files:
         for u in files:
-            data = load_file(u)
-            if data is not None:
-                st.session_state.datasets[u.name] = data
+            df = load_file(u)
+            if df is not None:
+                st.session_state.datasets[u.name] = df
         st.success("Files loaded into session.")
     if st.session_state.datasets:
         sel = st.selectbox("Select dataset", list(st.session_state.datasets.keys()), key='sel_dataset')
