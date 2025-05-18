@@ -268,11 +268,9 @@ with tabs[6]:
         email = st.text_input('Recipient email')
         time = st.time_input('Send time')
         if st.button('Schedule Daily Summary'):
-            schedule = (
-                f"BEGIN:VEVENT
+            schedule = f"""BEGIN:VEVENT
 RRULE:FREQ=DAILY;BYHOUR={time.hour};BYMINUTE={time.minute};BYSECOND=0
-END:VEVENT"
-            )
+END:VEVENT"""
             summary_prompt = (
                 f"Summarize dataset shape {pdf.shape} and variables {list(df_pl.columns)} in 3 bullet points."
             )
