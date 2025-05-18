@@ -157,7 +157,14 @@ with tabs[1]:
                 expr = manual
             if expr and st.button('Apply Polars Compute'):
                 try:
-                    df_new = df_pl.with_columns(pl.eval(expr).alias(newcol))
+                    # Try native Polars eval (if available)
+                    try:
+                        df_new = df_pl.with_columns(pl.eval(expr).alias(newcol))
+                    except (AttributeError, NotImplementedError):
+                        # Fallback to pandas eval
+                        pdf = df_pl.to_pandas()
+                        pdf[newcol] = pdf.eval(expr)
+                        df_new = pl.from_pandas(pdf)
                     st.session_state.datasets[key] = df_new
                     st.experimental_rerun()
                 except Exception as e:
