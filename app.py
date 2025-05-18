@@ -87,16 +87,14 @@ def load_file(f) -> pl.DataFrame:
     try:
         if ext == 'csv':
             df = pl.read_csv(f)
-        elif ext in ('xls', 'xlsx'):
-            # Use pandas + openpyxl to avoid fastexcel requirement
+        elif ext == 'xls':
+            # Use pandas + xlrd to read old Excel format
+            pdf = pd.read_excel(f, engine='xlrd')
+            df = pl.from_pandas(pdf)
+        elif ext == 'xlsx':
+            # Use pandas + openpyxl to read newer Excel format
             pdf = pd.read_excel(f, engine='openpyxl')
             df = pl.from_pandas(pdf)
-        elif ext == 'parquet':
-            df = pl.read_parquet(f)
-        elif ext == 'json':
-            df = pl.read_json(f)
-        else:
-            return None
         return sanitize_cols(df)
     except Exception as e:
         st.error(f"Failed to load {f.name}: {e}")
