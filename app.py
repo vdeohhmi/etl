@@ -20,8 +20,9 @@ st.set_page_config(
 )
 st.markdown(
     "<h1 style='text-align:center;'>🛠️ Data Transformer Pro Plus</h1>"
-    "<p style='text-align:center;color:gray;'>A polished ETL & Analysis studio — Created by Vishal</p>",
+    "<p style='text-align:center;color:gray;'>An ETL & Analysis studio — Created by Vishal</p>",
     unsafe_allow_html=True
+)
 )
 
 # --- Sidebar Navigation ---
