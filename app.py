@@ -1,3 +1,4 @@
+# app.py
 import os
 import streamlit as st
 import pandas as pd
@@ -113,7 +114,7 @@ tabs = st.tabs([
 
 # 1. Datasets
 with tabs[0]:
-    st.subheader("1. Load Data")
+    st.subheader("1. Load Data — Created by Vishal")
     files = st.file_uploader(
         "Upload CSV/Excel/Parquet/JSON files", 
         type=['csv','xls','xlsx','parquet','json'],
@@ -137,10 +138,11 @@ with tabs[0]:
         st.session_state.current = sel
         st.data_editor(
             st.session_state.datasets[sel], 
+            key=f"editor_{sel}",
             use_container_width=True
         )
 
-# 2. Transform
+# 2. Transform. Transform
 with tabs[1]:
     st.subheader("2. Transform Data")
     if not st.session_state.current:
