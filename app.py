@@ -23,7 +23,6 @@ st.markdown(
     "<p style='text-align:center;color:gray;'>An ETL & Analysis studio — Created by Vishal</p>",
     unsafe_allow_html=True
 )
-)
 
 # --- Sidebar Navigation ---
 st.sidebar.title("Navigation")
